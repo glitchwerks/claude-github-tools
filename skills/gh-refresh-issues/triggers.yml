@@ -1,0 +1,22 @@
+triggers:
+  command_prefixes:
+    - "/gh-refresh-issues"
+  keywords:
+    - { term: "issues", weight: 0.5 }
+    - { term: "refresh", weight: 0.5 }
+    - { term: "open", weight: 0.25 }
+    - { term: "backlog", weight: 0.25 }
+    - { term: "list", weight: 0.25 }
+    - { term: "show", weight: 0.25 }
+    - { term: "github", weight: 0.25 }
+    - { term: "labeled", weight: 0.25 }
+  keyword_groups:
+    # AND-group: display verb + issue-list noun. Per audit O1, flat keywords
+    # "open" / "list" / "show" over-fire on countless unrelated prompts.
+    # Group restricts firing to "show me open issues" intent.
+    # Group multiplier 1.0 (match.py:92).
+    - slots:
+        - { name: verbs, terms: [show, list, refresh, display, view, see] }
+        - { name: nouns, terms: [issues, backlog, tickets, milestone] }
+      weight: 1.0
+applicable_agents: [] # router-only; no sub-agents receive this skill

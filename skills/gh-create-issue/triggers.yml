@@ -1,0 +1,21 @@
+triggers:
+  command_prefixes:
+    - "/gh-create-issue"
+  keywords:
+    - { term: "issue", weight: 0.5 }
+    - { term: "ticket", weight: 0.5 }
+    - { term: "github", weight: 0.5 }
+    - { term: "backlog", weight: 0.25 }
+    - { term: "track", weight: 0.25 }
+    - { term: "log", weight: 0.25 }
+  keyword_groups:
+    # AND-group: verb + noun must co-occur to fire. Per audit O1
+    # (docs/audits/2026-05-20-wayfinder-v071-schema-audit.md): flat keywords
+    # like "open" and "log" over-fire on unrelated prompts ("open the file",
+    # "log this error"). The conjunctive group restricts firing to actual
+    # issue-creation intent. Group multiplier 1.0 (match.py:92).
+    - slots:
+        - { name: verbs, terms: [create, open, file, log, make, add, raise] }
+        - { name: nouns, terms: [issue, ticket, bug, task] }
+      weight: 1.0
+applicable_agents: [] # router-only; interactive skill, requires user dialogue

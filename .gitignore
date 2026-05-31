@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node (if any tooling is added later)
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+
+# Agent scratch / worktrees
+.tmp/
+.worktrees/

@@ -1,0 +1,25 @@
+triggers:
+  command_prefixes:
+    - "/gh-summary"
+  keywords:
+    - { term: "roadmap", weight: 1.0 }
+    - { term: "orphaned", weight: 1.0 }
+    - { term: "epics", weight: 0.5 }
+    - { term: "milestones", weight: 0.5 }
+    - { term: "completion", weight: 0.5 }
+    - { term: "overview", weight: 0.25 }
+    - { term: "progress", weight: 0.25 }
+    - { term: "summarize", weight: 0.25 }
+    - { term: "snapshot", weight: 0.25 }
+  keyword_groups:
+    # AND-group: roadmap intent verb + repo/project noun.
+    # Prevents over-firing on "show me the code" or "summarize this file".
+    # Group multiplier 1.0 (match.py:92).
+    - slots:
+        - { name: verbs, terms: [show, summarize, display, give, what] }
+        - {
+            name: nouns,
+            terms: [roadmap, orphans, epics, overview, progress, state],
+          }
+      weight: 1.0
+applicable_agents: [] # router-only; no sub-agents receive this skill

@@ -1,0 +1,21 @@
+{
+  "name": "claude-github-tools",
+  "version": "0.1.0",
+  "description": "GitHub workflow skills for Claude Code - issue creation, PR review triage, backlog summaries/quick-wins, and GitHub Actions authoring.",
+  "author": {
+    "name": "Christopher Beaulieu",
+    "email": "cmb_dev@outlook.com"
+  },
+  "homepage": "https://github.com/glitchwerks/claude-github-tools",
+  "repository": "https://github.com/glitchwerks/claude-github-tools",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "github",
+    "issues",
+    "pull-requests",
+    "github-actions",
+    "ci",
+    "workflow"
+  ]
+}
