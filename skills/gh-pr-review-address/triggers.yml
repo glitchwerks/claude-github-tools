@@ -1,0 +1,30 @@
+triggers:
+  command_prefixes:
+    - "/gh-pr-review-address"
+  keywords:
+    - { term: "pr", weight: 0.5 }
+    - { term: "review", weight: 0.5 }
+    - { term: "feedback", weight: 0.5 }
+    - { term: "blocking", weight: 0.5 }
+    - { term: "comments", weight: 0.5 }
+    - { term: "checks", weight: 0.5 }
+    - { term: "ci", weight: 0.25 }
+    - { term: "merge", weight: 0.25 }
+    - { term: "failures", weight: 0.25 }
+  keyword_groups:
+    # AND-group: PR-action verb + PR-feedback noun. Per audit O1, flat keywords
+    # like "review" / "feedback" / "checks" over-fire ("review this design",
+    # "code review"). Group restricts firing to act-on-existing-PR intent.
+    # Group multiplier 1.0 (match.py:92).
+    - slots:
+        - {
+            name: verbs,
+            terms: [address, process, handle, fix, resolve, check],
+          }
+        - {
+            name: nouns,
+            terms:
+              [review, feedback, comments, blocking, pr, ci, failures, checks],
+          }
+      weight: 1.0
+applicable_agents: [] # router-only; interactive skill requiring user dialogue

@@ -1,0 +1,158 @@
+{
+  "skill_name": "gh-create-issue",
+  "evals": [
+    {
+      "id": 1,
+      "eval_name": "unassigned-member-visibility",
+      "prompt": "/gh-create-issue add a way to see which members don't have any posts assigned on the board",
+      "expected_output": "Well-formed issue draft with all required sections. Should detect potential overlap with issue #93. Should ask clarifying questions about UI approach, scope of 'posts', and whether reserves count.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "A1",
+          "name": "asked-clarifying-questions",
+          "description": "conversation.md contains at least one round of clarifying questions from Claude before the draft is presented",
+          "check_in": "with_skill/outputs/conversation.md"
+        },
+        {
+          "id": "A2",
+          "name": "draft-has-required-sections",
+          "description": "issue_draft.md contains all of: Summary, Acceptance Criteria, and Out of Scope sections",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "A3",
+          "name": "existing-issues-searched",
+          "description": "investigation_notes.md mentions checking GitHub issues or lists specific existing issues that were found",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "A4",
+          "name": "draft-includes-label-suggestion",
+          "description": "issue_draft.md recommends at least one specific label (e.g. enhancement, bug)",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "B1",
+          "name": "overlap-with-93-considered",
+          "description": "investigation_notes.md or conversation.md mentions issue #93 and assesses whether it overlaps with this request",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "B2",
+          "name": "board-files-investigated",
+          "description": "investigation_notes.md references at least one specific frontend file related to the board (e.g. BoardPage.tsx, MemberBucket)",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "B3",
+          "name": "scope-of-posts-clarified",
+          "description": "conversation.md shows Claude asked about what 'posts' means (all positions vs Posts tab specifically) or where on the UI the feature should appear",
+          "check_in": "with_skill/outputs/conversation.md"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "eval_name": "bot-reserve-notification-bug",
+      "prompt": "/gh-create-issue the bot isn't sending notifications to members who have the reserve flag set",
+      "expected_output": "Well-formed bug report. Should investigate bot/ directory. Should note relationship to #111 (reserve flag logic). Should ask clarifying questions about expected behavior and reproduction.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "A1",
+          "name": "asked-clarifying-questions",
+          "description": "conversation.md contains at least one round of clarifying questions from Claude before the draft is presented",
+          "check_in": "with_skill/outputs/conversation.md"
+        },
+        {
+          "id": "A2",
+          "name": "draft-has-required-sections",
+          "description": "issue_draft.md contains all of: Summary, Acceptance Criteria, and Out of Scope sections",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "A3",
+          "name": "existing-issues-searched",
+          "description": "investigation_notes.md mentions checking GitHub issues or lists specific existing issues that were found",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "A4",
+          "name": "draft-includes-label-suggestion",
+          "description": "issue_draft.md recommends at least one specific label (e.g. enhancement, bug)",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "C1",
+          "name": "bot-directory-investigated",
+          "description": "investigation_notes.md references specific files inside the bot/ directory or mentions bot-specific notification code",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "C2",
+          "name": "reserve-flag-issue-111-noted",
+          "description": "investigation_notes.md or conversation.md mentions issue #111 as related (both involve the reserve flag)",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "C3",
+          "name": "bug-report-format",
+          "description": "issue_draft.md uses bug report framing: describes current (broken) behavior vs expected behavior, not just a feature description",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "eval_name": "rbac-publish-siege",
+      "prompt": "[Blank invoke] User then says: I want to restrict who can publish a siege — only Officers and Leaders should be able to do it",
+      "expected_output": "Should ask for description first. Then detect direct overlap with #51 which explicitly mentions role-based access as future work. Should flag this and ask the user how to proceed rather than auto-creating a new issue.",
+      "files": [],
+      "assertions": [
+        {
+          "id": "A1",
+          "name": "asked-clarifying-questions",
+          "description": "conversation.md contains at least one round of clarifying questions from Claude before the draft is presented",
+          "check_in": "with_skill/outputs/conversation.md"
+        },
+        {
+          "id": "A2",
+          "name": "draft-has-required-sections",
+          "description": "issue_draft.md contains all of: Summary, Acceptance Criteria, and Out of Scope sections (or documents why a new issue wasn't created due to overlap)",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "A3",
+          "name": "existing-issues-searched",
+          "description": "investigation_notes.md mentions checking GitHub issues or lists specific existing issues that were found",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "A4",
+          "name": "draft-includes-label-suggestion",
+          "description": "issue_draft.md recommends at least one specific label (e.g. enhancement, bug) — or notes that a new issue wasn't created due to overlap with #51",
+          "check_in": "with_skill/outputs/issue_draft.md"
+        },
+        {
+          "id": "D1",
+          "name": "blank-invoke-prompted-for-description",
+          "description": "conversation.md shows Claude's first response is a question asking what issue to create (because no description was provided)",
+          "check_in": "with_skill/outputs/conversation.md"
+        },
+        {
+          "id": "D2",
+          "name": "overlap-with-51-detected",
+          "description": "investigation_notes.md or conversation.md explicitly flags that #51 (Discord OAuth2) mentions role-based access control as future work — not just that auth is a dependency",
+          "check_in": "with_skill/outputs/investigation_notes.md"
+        },
+        {
+          "id": "D3",
+          "name": "user-given-choice-on-overlap",
+          "description": "conversation.md shows Claude presented the #51 overlap to the user and asked whether to create a new issue, update #51, or link — rather than silently auto-creating a new issue",
+          "check_in": "with_skill/outputs/conversation.md"
+        }
+      ]
+    }
+  ]
+}

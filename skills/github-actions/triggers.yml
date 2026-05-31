@@ -1,0 +1,28 @@
+triggers:
+  path_globs:
+    - "**/.github/workflows/*.yml"
+    - "**/.github/workflows/*.yaml"
+    - "**/action.yml"
+    - "**/action.yaml"
+  keywords:
+    - { term: "github-actions", weight: 1.0 }
+    - { term: "workflow", weight: 0.5 }
+    - { term: "runner", weight: 0.5 }
+    - { term: "actions", weight: 0.5 }
+    - { term: "reusable", weight: 0.5 }
+    - { term: "composite", weight: 0.5 }
+    - { term: "runs-on", weight: 0.5 }
+    - { term: "uses", weight: 0.25 }
+  tool_mentions:
+    - "gh"
+    - "actionlint"
+  excludes:
+    - "gitlab-ci"
+    - "circleci"
+    - "jenkins"
+applicable_agents:
+  - code-writer
+  - debugger
+  - code-reviewer
+  - inquisitor
+  - project-planner

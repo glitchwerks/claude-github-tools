@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-github-tools"
+version = "0.1.0"
+description = "GitHub workflow scripts for the claude-github-tools Claude Code plugin"
+requires-python = ">=3.9"
+# Runtime dependencies for the gh-* scripts.
+# The scripts shell out to the `gh` CLI; no heavy Python runtime deps needed.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.hatch.build.targets.wheel]
+# Flat layout: scripts/ is not a Python package for installation purposes.
+# We only use pyproject.toml for tooling config and the dev extra.
+include = ["scripts/"]
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/tests"]
+# Add scripts/ to sys.path so `import _gh_common` resolves when pytest
+# discovers and runs the test files.  The tests also do this themselves
+# via importlib, but conftest.py path injection ensures any future tests
+# that use plain `import` also work.
+pythonpath = ["scripts"]
+
+[tool.ruff]
+# Lint the scripts directory only.
+include = ["scripts/**/*.py"]
+line-length = 79
+
+[tool.ruff.lint]
+# E: pycodestyle errors, F: pyflakes, W: pycodestyle warnings
+select = ["E", "F", "W"]
+ignore = [
+    # Line too long — handled by formatter preference, not hard error
+    "E501",
+]
