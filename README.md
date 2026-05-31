@@ -4,7 +4,7 @@ GitHub workflow skills for Claude Code, shipped as a plugin via the glitchwerks 
 
 ## What this is
 
-`claude-github-tools` bundles six GitHub workflow skills into a single Claude Code plugin. Three skills are pure LLM-based and work immediately after install; three are script-backed and use a plugin-owned Python virtualenv that a bundled `SessionStart` hook materializes automatically on first session.
+`claude-github-tools` bundles seven GitHub workflow skills into a single Claude Code plugin. Three skills are pure LLM-based and work immediately after install; four are script-backed and use a plugin-owned Python virtualenv that a bundled `SessionStart` hook materializes automatically on first session.
 
 | Skill | What it does |
 |---|---|
@@ -12,6 +12,7 @@ GitHub workflow skills for Claude Code, shipped as a plugin via the glitchwerks 
 | `gh-pr-review-address` | Triages every open review comment and failing CI check on your PRs: auto-fixes unambiguous items, surfaces judgment calls for discussion, and logs deferred feedback as new issues |
 | `gh-quick-wins` | Filters and ranks the open backlog by blast radius and impact, producing a top-10 table of actionable items |
 | `gh-refresh-issues` | Fetches open issues (optionally including PRs) grouped by milestone, with a Labels column — zero LLM tokens consumed |
+| `gh-release-status` | Shows the most recent releases table and a per-area diff between the latest release tag and the default branch — what's unreleased and where the changes landed |
 | `gh-summary` | Produces a roadmap snapshot covering epics, milestone completion percentages, critical/blocked issues, recent releases, and a short prose summary of recent activity |
 | `github-actions` | Expert authoring, review, and debugging assistant for `.github/workflows/*.yml` files, reusable workflows, composite actions, and CI/CD pipelines |
 

@@ -23,9 +23,7 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import re
-import subprocess
 import sys
 from typing import Any
 
@@ -307,57 +305,14 @@ def _render_critical_issues(
 def _render_recent_releases() -> str | None:
     """Render a markdown section: the 5 most recent releases.
 
-    Shells out to ``gh release list --limit 5 --json ...``. Returns
-    ``None`` (skip the section entirely) when the repo has no releases or
-    when ``gh`` returns an error.
+    Delegates to ``_gh_common.render_recent_releases`` which is the
+    shared implementation used by both gh-summary and gh-release-status.
 
     Returns:
         Multi-line markdown string for the section, or ``None`` if the
         repo has no releases.
     """
-    cmd = [
-        "gh",
-        "release",
-        "list",
-        "--limit",
-        "5",
-        "--json",
-        "tagName,publishedAt,name",
-    ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    if result.returncode != 0:
-        return None
-
-    try:
-        releases: list[dict[str, Any]] = json.loads(result.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-    if not releases:
-        return None
-
-    lines: list[str] = []
-    lines.append("### Recent releases")
-    lines.append("")
-
-    rows: list[list[str]] = []
-    for rel in releases:
-        tag = rel.get("tagName", "")
-        published = rel.get("publishedAt", "")[:10]  # YYYY-MM-DD
-        name = rel.get("name", "")
-        rows.append([tag, published, name])
-
-    table = _gh_common.render_table(
-        ["Tag", "Published", "Title"],
-        rows,
-    )
-    lines.append(table)
-    return "\n".join(lines)
+    return _gh_common.render_recent_releases()
 
 
 # ---------------------------------------------------------------------------
