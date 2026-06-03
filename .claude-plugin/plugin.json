@@ -1,6 +1,6 @@
 {
   "name": "claude-github-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "GitHub workflow skills for Claude Code - issue creation, PR review triage, backlog summaries/quick-wins, and GitHub Actions authoring.",
   "author": {
     "name": "Christopher Beaulieu",
