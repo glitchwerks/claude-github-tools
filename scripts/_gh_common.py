@@ -27,20 +27,37 @@ def run_gh_api(
     paginate: bool = False,
     jq: str | None = None,
 ) -> Any:
-    """Call ``gh api <path>`` and return parsed JSON.
+    """Call ``gh api <path>`` and return the parsed result.
+
+    When a ``jq`` filter is supplied, ``gh`` may emit the selected value
+    as raw, unquoted text (e.g. ``main\\n`` for a string field, ``42\\n``
+    for an integer field).  ``json.loads`` handles valid JSON scalars
+    (numbers, booleans, ``null``) transparently, but raises
+    ``JSONDecodeError`` for bare strings like ``main``.  In that case the
+    raw, stripped stdout is returned as a plain Python string.
+
+    When no ``jq`` filter is supplied the full response must be valid
+    JSON; a parse failure is a genuine error and is allowed to propagate.
 
     Args:
         path: GitHub API path, e.g. ``repos/owner/repo/issues``.
         paginate: When True, pass ``--paginate`` to gh so all pages are
             fetched automatically and merged into a single JSON array.
-        jq: Optional jq filter string. Passed as ``--jq <filter>`` to gh.
+        jq: Optional jq filter string. Passed as ``--jq <filter>`` to
+            gh.  When the filter selects a scalar string field, the
+            return value will be a plain Python ``str`` rather than a
+            parsed JSON type.
 
     Returns:
-        Parsed JSON value (dict, list, str, int, etc.) from gh stdout.
+        Parsed JSON value (dict, list, int, bool, None) or, when a
+        ``jq`` filter was supplied and the output is a bare unquoted
+        string, a plain ``str`` with surrounding whitespace stripped.
 
     Raises:
-        RuntimeError: If gh exits with a non-zero return code. The error
-            message includes gh's stderr output.
+        RuntimeError: If gh exits with a non-zero return code.  The
+            error message includes gh's stderr output.
+        json.JSONDecodeError: If no ``jq`` filter was supplied and
+            gh's stdout is not valid JSON (indicates a real API error).
     """
     cmd = ["gh", "api", path]
     if paginate:
@@ -59,7 +76,14 @@ def run_gh_api(
             f"gh api {path!r} failed (exit {result.returncode}): "
             f"{result.stderr.strip()}"
         )
-    return json.loads(result.stdout)
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        if jq is not None:
+            # gh emitted a raw scalar (unquoted string); return stripped.
+            return result.stdout.strip()
+        raise
 
 
 def get_current_repo() -> tuple[str, str]:
