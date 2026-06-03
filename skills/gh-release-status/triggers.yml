@@ -1,0 +1,24 @@
+triggers:
+  command_prefixes:
+    - "/gh-release-status"
+  keywords:
+    - { term: "unreleased", weight: 1.0 }
+    - { term: "release status", weight: 1.0 }
+    - { term: "diff against last release", weight: 1.0 }
+    - { term: "changes since last release", weight: 1.0 }
+    - { term: "what shipped", weight: 0.5 }
+    - { term: "release", weight: 0.25 }
+    - { term: "tagged", weight: 0.25 }
+    - { term: "changelog", weight: 0.25 }
+  keyword_groups:
+    # AND-group: release intent verb + comparison noun.
+    # Prevents over-firing on "what changed in this file" or
+    # "show the release notes for v2".
+    - slots:
+        - { name: verbs, terms: [what, show, diff, compare, since] }
+        - {
+            name: nouns,
+            terms: [unreleased, release, tag, shipped, changelog],
+          }
+      weight: 1.0
+applicable_agents: [] # router-only; no sub-agents receive this skill

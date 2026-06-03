@@ -1,16 +1,19 @@
-"""Shared helpers for gh-summary and gh-refresh-issues scripts.
+"""Shared helpers for GitHub workflow scripts.
 
 Provides a thin subprocess wrapper around ``gh api``, a repo-detection
-helper, and a markdown table renderer. All functions are pure or
-side-effect-free except ``run_gh_api`` and ``get_current_repo``, which
-shell out to ``gh``.
+helper, a markdown table renderer, and a recent-releases section
+renderer shared by ``gh-summary`` and ``gh-release-status``.
+
+All functions are pure or side-effect-free except ``run_gh_api``,
+``get_current_repo``, and ``render_recent_releases``, which shell out
+to ``gh``.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any
+from typing import Any, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -136,3 +139,72 @@ def render_table(
     for row in rows:
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
+
+
+def render_recent_releases(
+    limit: int = 5,
+    repo: Optional[str] = None,
+) -> Optional[str]:
+    """Render a markdown section listing recent releases.
+
+    Shells out to ``gh release list --limit N --json ...``. Returns
+    ``None`` (skip the section entirely) when the repo has no releases
+    or when ``gh`` returns an error.
+
+    Args:
+        limit: Maximum number of releases to show. Defaults to 5.
+        repo: Optional ``owner/name`` repository slug. When provided,
+            passed as ``--repo`` to ``gh``. When omitted, ``gh`` auto-
+            detects from the current working directory.
+
+    Returns:
+        Multi-line markdown string for the section (``### Recent
+        releases`` header + table), or ``None`` if the repo has no
+        releases or ``gh`` fails.
+    """
+    cmd = [
+        "gh",
+        "release",
+        "list",
+        "--limit",
+        str(limit),
+        "--json",
+        "tagName,publishedAt,name",
+    ]
+    if repo:
+        cmd.extend(["--repo", repo])
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        return None
+
+    try:
+        releases: list[dict[str, Any]] = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    if not releases:
+        return None
+
+    section_lines: list[str] = []
+    section_lines.append("### Recent releases")
+    section_lines.append("")
+
+    rows: list[list[str]] = []
+    for rel in releases:
+        tag = rel.get("tagName", "")
+        published = rel.get("publishedAt", "")[:10]  # YYYY-MM-DD
+        name = rel.get("name", "")
+        rows.append([tag, published, name])
+
+    table = render_table(
+        ["Tag", "Published", "Title"],
+        rows,
+    )
+    section_lines.append(table)
+    return "\n".join(section_lines)
