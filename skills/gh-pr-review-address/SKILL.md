@@ -14,7 +14,6 @@ description: >
   pull request review comments or failing checks. If the user is in a repo and
   mentions PRs, reviews, or CI status in any action-oriented way, this skill
   should activate.
-context-switch: true
 ---
 
 # PR Feedback Processor
