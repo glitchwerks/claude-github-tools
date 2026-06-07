@@ -66,7 +66,7 @@ branch name. If they do, skip the discovery step and target only that PR.
 Fetch the full PR data directly, running these in parallel:
 
 ```bash
-# 1. PR details — title, description, changed files, reviews
+# 1. PR details + formal review bodies — title, description, changed files, reviews
 gh pr view <N> --repo <owner>/<repo> --json title,body,files,reviews,state
 
 # 2. Inline review-thread comments (anchored to file + line)
@@ -81,6 +81,14 @@ gh pr view <N> --repo <owner>/<repo> --json mergeable,mergeStateStatus
 
 For item 4: if `mergeable` is `UNKNOWN`, wait ~5 seconds and re-run that command once. If still `UNKNOWN` after one retry, proceed with `UNKNOWN` noted explicitly — do not interpret it as clean.
 
+These commands return **three distinct finding streams** — keep them as
+separate lists through triage, never merge them into one:
+
+- **Review-body findings** — the `reviews[].body` text from #1 (a reviewer's formal
+  review summary).
+- **Inline findings** — the per-line review-thread comments from #2.
+- **Conversation findings** — the general PR-conversation comments from #3.
+
 **Why #2 and #3 are both required:** `get_pull_request_comments` returns ONLY inline
 review-thread comments (anchored to a file + line). General PR-conversation comments —
 where automated review bots like `claude-action-runner`, `coderabbitai`, and `copilot[bot]`
@@ -88,6 +96,15 @@ post substantial multi-finding reviews — live in the **issue_comments API**, b
 treats a PR as a special issue sharing the same number (PR # = issue #). Fetching only inline
 comments silently misses these. Treat any review by an automated reviewer as a high-priority
 signal even when it arrives as a single conversation comment.
+
+**Why the formal review body is not canonical:** bot reviewers (Codex, CodeRabbit,
+Copilot) increasingly post their actual findings as **inline comments** (#2) while the
+formal review **body** (#1) carries only a generic "Here are some automated review
+suggestions" preamble — no severity tags, no findings text. **An empty or preamble-only
+review body does NOT mean "no findings"** — the findings are in the inline stream. Never
+let the review-body text gate whether you inspect the inline list; the two streams are
+independent. (Incident: a P1 inline comment was silently dropped because the review body
+was treated as canonical — `glitchwerks/claude-configs` PR #833 / commit `be03d7f`.)
 
 **Determining what's unresolved:** A comment is resolved if the thread is marked
 resolved on GitHub, or if a later commit message or reply clearly addresses it.
@@ -140,7 +157,22 @@ additional items to triage in the next step.
 
 Do this yourself — triage is analysis, not implementation.
 
-Apply the **suppression filter first**, then evaluate the surviving items on
+### Iterate every finding stream independently
+
+Triage walks all three Step 2 finding streams — review-body, inline, and
+conversation — and treats each as its own list:
+
+- **Iterate inline comments one at a time.** Each inline comment is a separate
+  finding; do not expect one finding per formal review, and do not roll multiple
+  inline comments up into a single review-level verdict. Every inline comment
+  ends up as its own row in the triage matrix.
+- **An empty or preamble-only review body must NOT short-circuit triage.** If the
+  formal review body (#1) is blank or just a generic preamble, that says nothing
+  about the inline (#2) and conversation (#3) streams — triage those in full
+  regardless. Never use "review body had no findings" as a reason to skip the
+  inline list.
+
+Then apply the **suppression filter first**, then evaluate the surviving items on
 the two axes that follow.
 
 ### Suppression filter (apply first)
@@ -358,7 +390,12 @@ After all PRs are processed, give the user a concise recap:
 - Which PRs were checked
 - Whether merge conflicts were resolved (and how)
 - What CI failures were fixed (check name + what was wrong)
-- What review comments were auto-fixed (commit hash and bullet list of changes)
+- What review comments were auto-fixed (commit hash and bullet list of changes),
+  reported under **two separate headings** so the user sees what was triaged in
+  each category:
+  - **Review-body findings** — items drawn from formal review summaries
+  - **Inline findings** — items drawn from per-line review-thread comments
+    (also note the count, so an inline-only review is visibly accounted for)
 - What was discussed and how it was resolved
 - What issues were created for deferred items
 - **Findings suppressed by the Step 3 nit/cosmetic filter** — one line per suppression with the bot, the file/line ref, and a 6-8 word summary so the user can spot any that should have been kept and ask for them to be re-included
