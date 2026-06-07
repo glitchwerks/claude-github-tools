@@ -339,6 +339,97 @@ For each out-of-scope item:
 
 ---
 
+## Step 4.5 — Resolve addressed bot review threads
+
+Run this **only after Step 4 fix-up commits have actually landed** on the PR
+branch. GitHub does not auto-resolve review threads when the addressing code
+lands — threads can be marked **Outdated** (when their anchor lines move) but
+only a human or bot can flip them to **Resolved**. Left alone, addressed
+threads stay "Open" in the PR UI, the "Files changed" tab keeps flagging
+conversations that are actually handled, and branch-protection rules that gate
+on "all conversations resolved" can't be satisfied without manual clicks.
+
+If no fix-up commits were pushed (everything was suppressed, out-of-scope, or
+pending discussion), **skip this step** — there is nothing to mark resolved.
+
+### Two modes
+
+| Mode               | Resolves                                                              | Default     |
+| ------------------ | -------------------------------------------------------------------- | ----------- |
+| **B (conservative)** | Unresolved bot threads where `isOutdated == true`                  | ✅ default  |
+| **A (aggressive)**   | All unresolved bot threads, regardless of `isOutdated`            | opt-in only |
+
+**Default to Mode B.** Mode B combines two independent signals — GitHub already
+flagged the thread's anchor as moved (`isOutdated`) **and** the skill just pushed
+a fix addressing it — which together give strong confidence the resolution is
+correct. Only run Mode A when the user explicitly asks (a flag or a follow-up
+prompt), since it resolves threads GitHub has not yet flagged as outdated.
+
+### Bot allow-list
+
+Only ever resolve threads authored by a configured **review bot**. Initialize the
+allow-list to the same bots the Step 3 suppression filter recognizes:
+
+- `chatgpt-codex-connector[bot]`
+- `coderabbitai[bot]`
+- `copilot-pull-request-reviewer[bot]`
+
+The allow-list is configurable — the user may add or remove bot logins. **Never
+resolve a thread authored by a non-bot (human) reviewer**, in either mode.
+
+### Procedure
+
+1. **Enumerate** the PR's review threads with their resolution state, outdated
+   flag, and first-comment author:
+
+   ```bash
+   gh api graphql -F owner=<owner> -F repo=<repo> -F number=<N> --jq \
+     '.data.repository.pullRequest.reviewThreads.nodes[]' -f query='
+     query($owner:String!, $repo:String!, $number:Int!) {
+       repository(owner:$owner, name:$repo) {
+         pullRequest(number:$number) {
+           reviewThreads(first:100) {
+             nodes {
+               id
+               isResolved
+               isOutdated
+               comments(first:1) { nodes { author { login } } }
+             }
+           }
+         }
+       }
+     }'
+   ```
+
+   If the PR has more than 100 review threads, paginate with the `pageInfo`
+   cursor rather than silently processing only the first page.
+
+2. **Filter** to threads where all of these hold:
+   - `isResolved == false`
+   - the first comment's `author.login` is in the bot allow-list
+   - **(Mode B only)** `isOutdated == true`
+
+3. **Resolve** each surviving thread by its node `id`:
+
+   ```bash
+   gh api graphql -F threadId="<THREAD_NODE_ID>" -f query='
+     mutation($threadId:ID!) {
+       resolveReviewThread(input:{threadId:$threadId}) {
+         thread { isResolved }
+       }
+     }'
+   ```
+
+   Confirm the mutation returns `isResolved: true` for each.
+
+### Out of scope (do not attempt here)
+
+- Resolving threads that already have **bot replies** (e.g. a CodeRabbit
+  "fixed in commit X" follow-up) — those need their own resolution heuristic.
+- **Auto-replying** to threads with the fix-up commit SHA — separate enhancement.
+
+---
+
 ## PR body / comment body patterns
 
 When pushing a fresh PR body, comment, or release notes via `gh pr create`,
@@ -398,6 +489,9 @@ After all PRs are processed, give the user a concise recap:
     (also note the count, so an inline-only review is visibly accounted for)
 - What was discussed and how it was resolved
 - What issues were created for deferred items
+- **Review threads resolved in Step 4.5** — one line:
+  "Resolved N of M bot review threads (X were not yet outdated; skipped)."
+  Omit this line if Step 4.5 was skipped (no fix-up commits landed).
 - **Findings suppressed by the Step 3 nit/cosmetic filter** — one line per suppression with the bot, the file/line ref, and a 6-8 word summary so the user can spot any that should have been kept and ask for them to be re-included
 - Anything still pending user input
 
