@@ -5,7 +5,10 @@ description: >
   Triages every review comment and status check failure — auto-fixes unambiguous
   items and commits directly, discusses judgment calls with the user, and logs
   out-of-scope feedback as new GitHub issues. Can target a single PR by number
-  or process all open PRs authored by the user.
+  or process all open PRs authored by the user. Resolution-aware: reads
+  review-thread state (isResolved/isOutdated) and sticky review verdicts
+  (undismissed CHANGES_REQUESTED) at intake, so already-addressed feedback on
+  long multi-round PRs is not re-surfaced.
 
   Trigger this skill whenever the user says things like "check my PR feedback",
   "address my review comments", "what's blocking my PR", "process my PR reviews",
@@ -106,9 +109,11 @@ let the review-body text gate whether you inspect the inline list; the two strea
 independent. (Incident: a P1 inline comment was silently dropped because the review body
 was treated as canonical — `glitchwerks/claude-configs` PR #833 / commit `be03d7f`.)
 
-**Determining what's unresolved:** A comment is resolved if the thread is marked
-resolved on GitHub, or if a later commit message or reply clearly addresses it.
-When in doubt, treat it as unresolved.
+**Determining what's unresolved is a data step, not a guess** — see **Step 2.5**,
+which computes resolution state across three independent axes before triage. Do
+NOT decide "resolved" from the REST comment fetches alone: they carry no
+resolution state, and using them alone makes you re-triage every comment from
+every past round (the exact failure this skill exists to avoid).
 
 ### Merge conflicts
 
@@ -153,9 +158,127 @@ additional items to triage in the next step.
 
 ---
 
+## Step 2.5 — Determine resolution state (3 axes)
+
+Do this **before** triage. The Step 2 REST fetches (`pulls/N/comments`,
+`issues/N/comments`) carry **no resolution state** — used alone they make you
+re-triage every comment from every past round. "Addressed?" is not one signal
+but **three independent axes**. Compute all three, then Step 3 triages only the
+reconciled OPEN set.
+
+Anchor everything to the current head SHA:
+
+```bash
+HEAD_SHA=$(gh pr view <N> --repo <owner>/<repo> --json headRefOid --jq .headRefOid)
+```
+
+### Axis A — inline thread resolution (authoritative when present)
+
+`isResolved` / `isOutdated` live ONLY in the GraphQL `reviewThreads` API, never
+in REST. Fetch them — dump to a file, since these responses get large and `jq`
+is not on every host; parse with python:
+
+```bash
+gh api graphql -f owner=<owner> -f repo=<repo> -F number=<N> -f query='
+  query($owner:String!,$repo:String!,$number:Int!){
+    repository(owner:$owner,name:$repo){
+      pullRequest(number:$number){
+        reviewThreads(first:100){
+          nodes{
+            id isResolved isOutdated path line originalLine
+            comments(first:20){ nodes{ author{login} createdAt } }
+          }
+        }
+      }
+    }
+  }' > .tmp/pr<N>-threads.json
+```
+
+Paginate past 100 with the `pageInfo` cursor rather than silently truncating.
+Per thread:
+
+- `isResolved == true` → **RESOLVED** — drop from triage; never re-surface.
+- `isResolved == false` → carry to Axis B.
+
+### Axis B — line correctness (unresolved threads only)
+
+A thread the reviewer never clicked "Resolve" on may still be handled in code —
+bots almost never self-resolve. For each unresolved thread, decide whether a
+commit **after the thread's first comment** touched its `path` near its `line`:
+
+```bash
+# commits (with dates) on the PR
+gh api repos/<owner>/<repo>/pulls/<N>/commits --jq '.[] | {sha:.sha, date:.commit.committer.date}'
+# for a candidate commit, inspect its patch for the thread's file
+gh api repos/<owner>/<repo>/commits/<sha> --jq '.files[] | select(.filename=="<path>") | .patch'
+```
+
+Classify:
+
+- `isOutdated == true`, **or** a post-comment commit touched the line region →
+  **CANDIDATE-ADDRESSED** — gets a confirming thread reply, not a re-fix.
+- line untouched since the comment → **OPEN** — genuinely actionable.
+
+### Axis C — review verdict (sticky blockers)
+
+Independent of any thread state: a formal `CHANGES_REQUESTED` review stays
+blocking until the **same reviewer** submits a later `APPROVED`. **New commits
+do NOT clear it.** This is the axis the skill historically missed entirely — a
+PR with every inline thread resolved can still be hard-blocked here.
+
+```bash
+gh api repos/<owner>/<repo>/pulls/<N>/reviews --jq \
+  '.[] | {user:.user.login, state:.state, at:.submitted_at, commit:.commit_id}'
+```
+
+Per reviewer, take their latest review by `submitted_at`:
+
+- latest state `CHANGES_REQUESTED` with **no later `APPROVED` from that same
+  reviewer** → **STICKY BLOCKER**. Surface as the top blocking item — the PR
+  cannot merge until that reviewer re-reviews, no matter how many threads are
+  resolved.
+- latest state `APPROVED` → cleared.
+- `COMMENTED`-only reviewers (many bots) → non-blocking at the verdict axis;
+  their findings still triage via Axis A/B.
+
+Before weighting a blocking review, verify it targets a commit actually in head
+(not a stale review on an abandoned push):
+
+```bash
+gh api repos/<owner>/<repo>/compare/<review_commit>...<HEAD_SHA> --jq .status
+# identical / ahead => review commit is an ancestor of head (current)
+# diverged          => stale review on an abandoned commit; do not weight
+```
+
+### Reconcile and hand off
+
+Counts MUST add up: `total threads = RESOLVED + unresolved`, and
+`unresolved = CANDIDATE-ADDRESSED + OPEN`. If a number is uncertain, label it
+`unverified` — never guess "addressed".
+
+The **OPEN set Step 3 triages** = (Axis B OPEN threads) ∪ (un-addressed
+conversation / review-body findings from Step 2). RESOLVED and
+CANDIDATE-ADDRESSED threads generate no fix-up work — CANDIDATE-ADDRESSED gets a
+confirming reply at most. **STICKY BLOCKER verdicts (Axis C) are carried into
+Step 3 as the highest-priority items.**
+
+This shares the `reviewThreads` query with Step 4.5 but runs at the opposite
+end: Step 2.5 **reads** resolution state to scope triage; Step 4.5 **writes**
+resolution state after fix-up commits land.
+
+---
+
 ## Step 3 — Triage each comment and CI failure
 
 Do this yourself — triage is analysis, not implementation.
+
+**Triage only the OPEN set from Step 2.5.** Do not re-triage threads classified
+RESOLVED (Axis A) — re-surfacing already-resolved feedback as new work is the
+exact failure this skill exists to avoid. CANDIDATE-ADDRESSED threads (Axis B)
+get at most a confirming thread reply, not a fix-up commit. **STICKY BLOCKER
+verdicts (Axis C) enter triage as the highest-priority blocking items** even
+when every inline thread is resolved — the PR cannot merge until that reviewer
+re-reviews.
 
 ### Iterate every finding stream independently
 
@@ -479,6 +602,10 @@ Rules:
 After all PRs are processed, give the user a concise recap:
 
 - Which PRs were checked
+- **Resolution-state recap (Step 2.5)** — one line per PR:
+  `N threads: X resolved, Y candidate-addressed, Z open; sticky blockers: <reviewer(s)> or none.`
+  Counts must reconcile. This makes explicit that resolved history was NOT
+  re-triaged, and names any sticky `CHANGES_REQUESTED` verdict as the true blocker.
 - Whether merge conflicts were resolved (and how)
 - What CI failures were fixed (check name + what was wrong)
 - What review comments were auto-fixed (commit hash and bullet list of changes),
