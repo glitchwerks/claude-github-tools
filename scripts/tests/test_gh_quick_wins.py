@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
@@ -960,11 +961,14 @@ class TestRestFieldNormalization:
         self,
     ) -> None:
         """Normalized REST responses allow days_since_update to rank correctly."""
+        recent_updated_at = (
+            datetime.now(timezone.utc) - timedelta(days=5)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         old_issue = _make_rest_issue(
             20, "Old issue", [], updated_at="2020-01-01T00:00:00Z"
         )
         new_issue = _make_rest_issue(
-            21, "New issue", [], updated_at="2026-05-26T00:00:00Z"
+            21, "New issue", [], updated_at=recent_updated_at
         )
         mock_result = _make_paginated_gh_api_response(
             [[old_issue, new_issue]]
