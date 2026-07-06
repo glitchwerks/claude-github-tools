@@ -25,7 +25,16 @@ After each release, refresh the entry so the public listing stays accurate.
 
 2. Branch, then edit `.claude-plugin/marketplace.json` → the `claude-github-tools` entry → set `version` to `X.Y.Z` (and update `description` / `keywords` if they changed) so it matches this repo's `plugin.json`.
 
-3. Open the PR to upstream:
+3. Commit and push the branch to your fork's `origin` — `gh pr create --head` below looks for an existing remote head rather than pushing one, so this step must happen first:
+
+   ```bash
+   git -C <fork> checkout -b sync-claude-github-tools-vX.Y.Z
+   # (edit marketplace.json per step 2)
+   git -C <fork> commit -am "Update claude-github-tools to vX.Y.Z"
+   git -C <fork> push -u origin sync-claude-github-tools-vX.Y.Z
+   ```
+
+4. Open the PR to upstream:
 
    ```bash
    gh pr create --repo davepoon/buildwithclaude --base main \
@@ -37,4 +46,5 @@ After each release, refresh the entry so the public listing stays accurate.
 
 - [ ] Fork `main` synced with upstream
 - [ ] `claude-github-tools` entry in `marketplace.json` matches `plugin.json` (`version`, `description`, `keywords`)
+- [ ] Branch committed and pushed to fork's `origin`
 - [ ] PR opened to `davepoon/buildwithclaude`
