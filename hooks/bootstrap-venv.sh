@@ -81,12 +81,17 @@ fi
 # Create the venv.
 uv venv "${VENV_DIR}"
 
-# Install the plugin package and its dev extras so scripts can be run.
+# Install the runtime plugin package only. Dev tooling (pytest/ruff) is
+# intentionally excluded from the SessionStart bootstrap — this hook runs
+# on every session, and pulling floating dev-extra bounds from PyPI each
+# time widens the supply-chain surface for no runtime benefit. Contributors
+# who need dev tooling should install the dev extra separately (see
+# pyproject.toml's optional-dependencies).
 # --no-cache keeps the install hermetic (avoids stale wheel cache issues).
 uv pip install \
     --python "${VENV_DIR}" \
     --no-cache \
-    -e "${PLUGIN_ROOT}[dev]"
+    -e "${PLUGIN_ROOT}"
 
 # Persist the new fingerprint so the next session skips this step.
 printf '%s' "${CURRENT_HASH}" > "${STAMP_FILE}"
