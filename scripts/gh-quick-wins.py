@@ -330,7 +330,9 @@ def fetch_issues(
         limit: Safety ceiling on the total number of issues returned.
 
     Returns:
-        List of issue dicts from the GitHub API (PRs excluded).
+        List of issue dicts from the GitHub API (PRs excluded). If more
+        than ``limit`` issues were fetched, the list is truncated to
+        ``limit`` and a warning is printed to stderr noting the cap.
 
     Raises:
         RuntimeError: If ``gh`` exits non-zero or returns invalid JSON.
@@ -409,7 +411,15 @@ def fetch_issues(
         if "pull_request" not in item
     ]
 
-    # Apply the safety ceiling.
+    # Apply the safety ceiling, warning on stderr if issues are dropped
+    # so the caller knows the result may be truncated (Issue #19).
+    if len(issues_only) > limit:
+        print(
+            f"warning: fetched {len(issues_only)} open issues but "
+            f"limit is {limit}; results are truncated and some open "
+            "issues will not be shown",
+            file=sys.stderr,
+        )
     return issues_only[:limit]
 
 

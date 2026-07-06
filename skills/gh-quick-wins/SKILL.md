@@ -13,8 +13,9 @@ description: >
 
 # /gh-quick-wins
 
-Two-step recipe. The script applies a deterministic exclusion filter to all
-open issues and emits the surviving candidates as JSON. The LLM ranking pass
+Two-step recipe. The script applies a deterministic exclusion filter to the
+open-issue backlog — paginated in full, up to a bounded `--limit` cap — and
+emits the surviving candidates as JSON. The LLM ranking pass
 then reads those signals and produces a top-10 markdown table ordered by
 `impact / blast_radius`. Step 1 is zero-LLM; step 2 is the only place LLM
 tokens are spent.
@@ -49,8 +50,12 @@ includes a `signals` sub-object with:
 
 If the script exits non-zero, surface its stderr and stop.
 
-The script supports `--repo owner/repo` and `--max-ac N` flags. Pass them
-through if the user specifies a different repo or checkbox threshold.
+The script supports `--repo owner/repo`, `--max-ac N`, and `--limit N` flags.
+Pass them through if the user specifies a different repo or checkbox
+threshold. The fetch paginates through the full open-issue backlog up to
+`--limit` (default 5000); if the backlog exceeds the cap the script prints a
+truncation warning to stderr and processes only the first `--limit` issues —
+the view is bounded but never silently truncated.
 
 ## Step 2 — LLM ranking pass
 

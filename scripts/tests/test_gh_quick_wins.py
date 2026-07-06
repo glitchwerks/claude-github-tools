@@ -813,6 +813,51 @@ class TestPaginatedFetch:
             f"Expected --paginate in command, got: {cmd_str}"
         )
 
+    def test_fetch_issues_warns_on_truncation(self, capsys) -> None:
+        """fetch_issues warns on stderr when the fetched count exceeds limit.
+
+        Issue #19 (Option C): silent truncation is no longer acceptable.
+        When more open issues exist than ``limit``, fetch_issues must
+        still truncate to ``limit`` items, but it must also emit an
+        explicit warning to stderr naming the cap so the caller knows
+        the result may be incomplete.
+        """
+        issues = [_make_issue(i, f"Issue {i}", []) for i in range(1, 6)]
+        mock_result = _make_paginated_gh_api_response([issues])
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = self.mod.fetch_issues(repo="owner/repo", limit=3)
+
+        assert len(result) == 3, (
+            "fetch_issues must still truncate to the requested limit"
+        )
+
+        stderr = capsys.readouterr().err
+        assert "3" in stderr, (
+            "Truncation warning must name the cap (limit=3) on stderr, "
+            f"got: {stderr!r}"
+        )
+        assert "truncat" in stderr.lower(), (
+            "Truncation warning must mention truncation on stderr, "
+            f"got: {stderr!r}"
+        )
+
+    def test_fetch_issues_no_warning_within_limit(self, capsys) -> None:
+        """fetch_issues emits no truncation warning when under the limit."""
+        issues = [_make_issue(i, f"Issue {i}", []) for i in range(1, 3)]
+        mock_result = _make_paginated_gh_api_response([issues])
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = self.mod.fetch_issues(repo="owner/repo", limit=5)
+
+        assert len(result) == 2
+
+        stderr = capsys.readouterr().err
+        assert "truncat" not in stderr.lower(), (
+            "No truncation warning should be emitted when the fetched "
+            f"count is within limit, got: {stderr!r}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: REST field normalization
