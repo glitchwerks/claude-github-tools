@@ -4,12 +4,13 @@ GitHub workflow skills for Claude Code, shipped as a plugin via the glitchwerks 
 
 ## What this is
 
-`claude-github-tools` bundles seven GitHub workflow skills into a single Claude Code plugin. Three skills are pure LLM-based and work immediately after install; four are script-backed and use a plugin-owned Python virtualenv that a bundled `SessionStart` hook materializes automatically on first session.
+`claude-github-tools` bundles eight GitHub workflow skills into a single Claude Code plugin. Four skills are pure LLM-based and work immediately after install; four are script-backed and use a plugin-owned Python virtualenv that a bundled `SessionStart` hook materializes automatically on first session.
 
 | Skill | What it does |
 |---|---|
 | `gh-create-issue` | Runs a structured discovery workflow — codebase read, overlap check, clarification pass — before drafting and creating a well-scoped GitHub Issue |
 | `gh-pr-review-address` | Triages every open review comment and failing CI check on your PRs: auto-fixes unambiguous items, surfaces judgment calls for discussion, and logs deferred feedback as new issues |
+| `address-feedback` | Unattended goal-loop that drives a single PR to green-and-merged: repeatedly addresses reviewer (CodeRabbit and other bots) feedback and CI failures, waits for async re-review between rounds, then auto-merges once quiescent. Runs under `/loop /address-feedback` |
 | `gh-quick-wins` | Filters and ranks the open backlog by blast radius and impact, producing a top-10 table of actionable items |
 | `gh-refresh-issues` | Fetches open issues (optionally including PRs) grouped by milestone, with a Labels column — zero LLM tokens consumed |
 | `gh-release-status` | Shows the most recent releases table and a per-area diff between the latest release tag and the default branch — what's unreleased and where the changes landed |
@@ -18,7 +19,7 @@ GitHub workflow skills for Claude Code, shipped as a plugin via the glitchwerks 
 
 ## Prerequisites
 
-**GitHub CLI (required).** All six skills shell out to `gh` for at least some operations. You must be authenticated before using any skill:
+**GitHub CLI (required).** All eight skills shell out to `gh` for at least some operations. You must be authenticated before using any skill:
 
 ```bash
 gh auth login
