@@ -100,21 +100,38 @@ findings or run indefinitely.
 ```text
 <repo>/.tmp/address-feedback-pr<N>.json
 {
-  "run_id":        "<stable id minted on the first tick of this run>",
+  "run_id":        "<stable id for this run — see run identity below>",
   "target":        "<PR# | branch as given>",
   "owner_repo":    "<owner>/<repo>",
   "tick_count":    <int>,
   "act_rounds":    <int>,
   "last_findings": "<hash/fingerprint of the previous round's OPEN findings>",
+  "act_pushes":    [{"round": <int>, "sha": "<commit sha>"}],
   "parked_issues": [<issue numbers>]
 }
 ```
 
-- **First tick:** if the file is absent, mint `run_id`, initialize counters to 0,
-  and write it. If a file exists for a *different* `run_id`/`target`, treat it as
-  a stale prior run and reset (record the reset in the final report).
-- **Every tick:** load, increment `tick_count`, and enforce the caps against the
-  **persisted** counters — never against inferred commit history.
+**Run identity — how `run_id` is established and matched.** The entry contract
+supplies only a PR/branch target, not an invocation id, so the state file itself
+*is* the run's identity: the `(owner_repo, target)` pair keys the run, and
+`run_id` is a stable token minted on the run's first tick.
+
+- **First tick of a run:** if no state file exists for this `(owner_repo,
+  target)`, this is a **new run** — mint `run_id`, initialize counters to 0,
+  `act_pushes`/`parked_issues` to empty, and write it.
+- **Continuation tick:** a state file whose `owner_repo` **and** `target` match
+  the current invocation is **this run** — load and continue it.
+- **Different run for the same target** (state file exists but `run_id` is stale
+  by an explicit user restart, or `target` differs) → treat the old file as a
+  prior run and reset, recording the reset in the final report.
+
+Rules per tick:
+
+- **Every tick, in order:** (1) load state (fail closed on error, below);
+  (2) increment `tick_count`; (3) **enforce the caps FIRST** (§ step 0) against the
+  **persisted** counters — before any WAIT/ACT/EXIT branching — never against
+  inferred commit history; (4) on each ACT push, append `{round, sha}` to
+  `act_pushes` (the final report reads per-round shas from here across wakeups).
 - **Fail closed:** if the state file is unreadable, malformed, or inconsistent
   with the live PR (e.g. `owner_repo` mismatch), **stop and report** rather than
   proceed with reset guards. A loop that cannot trust its own guards must not
@@ -123,6 +140,15 @@ findings or run indefinitely.
 ---
 
 ## One tick
+
+### 0. Enforce loop caps (before any branching)
+
+Immediately after loading run-state, **before** resolving the PR or evaluating
+WAIT / ACT / EXIT, check the persisted counters against the caps. If
+`tick_count > MAX_TICKS` or `act_rounds >= MAX_ACT_ROUNDS`, **force-stop and
+report** now (`ScheduleWakeup({ stop: true })`) — do not fall through to an ACT
+or a merge on the tick where the cap is breached. Cap enforcement gates the whole
+tick; it is not a trailing step.
 
 ### 1. Resolve the target PR (fail closed on ambiguity)
 
@@ -219,9 +245,10 @@ If it differs from `EXPECTED_SHA`, someone else pushed during this tick —
 **discard the plan and restart the tick** (WAIT then re-gather) rather than
 committing against an unknown branch state. Only push when the sha still matches.
 
-After the fixes land and are pushed, update the run-state `last_findings`
-fingerprint and `act_rounds`, run the sibling's **Step 4.5** thread resolution,
-then schedule the next tick:
+After the fixes land and are pushed, update run-state: bump `act_rounds`, refresh
+the `last_findings` fingerprint, and append the pushed commit sha to `act_pushes`
+as `{round, sha}` (the final report reads per-round shas from here). Then run the
+sibling's **Step 4.5** thread resolution and schedule the next tick:
 
 ```text
 ScheduleWakeup({
@@ -237,11 +264,12 @@ merge-gate checklist (§ Safety guards). If every gate passes, merge; then
 `ScheduleWakeup({ stop: true })`. If any gate fails, **downgrade to stop-and-
 report** — leave the PR open, name the failed gate, and `stop`.
 
-### 4. Loop-cap guard
+### 4. Persist and schedule
 
-Enforce the runaway caps (§ Safety guards) against the **persisted** run-state
-counters on every tick. On any cap breach, force-stop with a report and
-`ScheduleWakeup({ stop: true })`.
+Caps are already enforced at **step 0** (before branching), so no trailing cap
+check is needed here. Confirm run-state was written this tick (`tick_count`, and
+`act_rounds` / `act_pushes` / `last_findings` if an ACT ran) before the tick ends,
+so the next wakeup resumes from durable state rather than re-inferring it.
 
 ---
 
@@ -292,10 +320,22 @@ item never blocks quiescence, but an *un-parkable* one does.
 Sourced from `CLAUDE.md § Pull Requests`. Auto-merge yields to **every** one:
 
 - **Live re-fetch immediately before merge** — PR still open, not already merged.
-- **Re-validate ownership + merge permission at the merge boundary** — re-run the
-  authenticated ownership check (§ Tick step 1) against the *current* head repo
-  owner. A repo can be transferred or access revoked mid-loop; a tick-1 check is
-  stale authorization. Fail closed if it no longer matches.
+- **Re-validate effective merge permission at the merge boundary** — ownership by
+  login is **not** sufficient: an owner can still be blocked by branch protection,
+  and a non-owner collaborator may legitimately have merge rights. Query the
+  authenticated user's *effective* permission on the head repo, not just the owner
+  login:
+
+  ```bash
+  # viewer's permission on the repo (ADMIN / MAINTAIN / WRITE grant merge; READ does not)
+  gh api repos/<owner>/<repo> --jq .permissions
+  # and the PR's own mergeability for the viewer
+  gh pr view <N> --repo <owner>/<repo> --json viewerCanUpdate,mergeStateStatus
+  ```
+
+  Re-run this at the merge boundary (not only tick 1) — a repo can be transferred
+  or access revoked mid-loop; a tick-1 check is stale authorization. Fail closed
+  if the viewer lacks an effective merge permission.
 - **CI `success` on the actual merge result, not just the PR head.** `gh pr checks
   <N>` is tied to the head commit and can miss failures on the merged result.
   Fetch the test-merge / merge-queue sha (`gh pr view <N> --json
@@ -307,6 +347,14 @@ Sourced from `CLAUDE.md § Pull Requests`. Auto-merge yields to **every** one:
 - **`mergeStateStatus` ∈ {`CLEAN`, `HAS_HOOKS`, `UNSTABLE`}** — never `DIRTY`,
   `BLOCKED`, or `BEHIND`.
 - **No `DO NOT MERGE` banner** in the PR body.
+- **Merge queues only enqueue — do not report "merged" on enqueue.** When a merge
+  queue is configured, `gh pr merge` / `merge_pull_request` may enable auto-merge
+  or **add the PR to the queue** instead of producing a merge commit immediately.
+  Do **not** treat the enqueue response as "merged" and do **not** `stop` yet:
+  re-fetch until `state == MERGED` with a non-null `mergedAt` (or the queue reports
+  the PR merged), and only then report **merged** with the merge sha. If the queue
+  rejects the PR (falls out on a failing required check), downgrade to
+  stop-and-report. Treat "enqueued, awaiting queue CI" as a WAIT, not an EXIT.
 
 **Any gate fails ⇒ downgrade the exit to stop-and-report.** Surface which gate
 failed, leave the PR open, and `stop`. Never merge on a failed gate — even to
