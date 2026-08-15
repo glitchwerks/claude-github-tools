@@ -190,13 +190,21 @@ gh api graphql -f owner=<owner> -f repo=<repo> -F number=<N> -f query='
         reviewThreads(first:100){
           nodes{
             id isResolved isOutdated path line originalLine
-            comments(first:20){ nodes{ author{login} createdAt } }
+            comments(first:20){ nodes{ databaseId author{login} createdAt body } }
           }
         }
       }
     }
   }' > .tmp/pr<N>-threads.json
 ```
+
+`databaseId` on each comment node is the same value as that comment's REST
+`id` from the Step 2 inline-comments fetch (`pulls/<N>/comments`) — it's the
+join key that lets later steps (§ Gating bots: reply + resolve) match a
+specific suppressed comment to its exact position in a thread, rather than
+guessing from `path`/`line`/`author` alone. `body` is included so the same
+fetch can also detect an existing reply (see § Reply and resolve are
+independently retryable).
 
 Paginate past 100 with the `pageInfo` cursor rather than silently truncating.
 Per thread:
@@ -316,7 +324,7 @@ in the Step 5 summary so the user can override.
 | Bot                             | Suppress these                                                               |
 | ------------------------------- | ---------------------------------------------------------------------------- |
 | `claude-action-runner[bot]`     | `findings.low` (the schema's lowest tier)                                    |
-| `coderabbit-ai[bot]`            | Inline comments starting with `Nitpick:` or `Nit:`                           |
+| `coderabbitai[bot]`             | Inline comments starting with `Nitpick:` or `Nit:`                           |
 | `chatgpt-codex-connector[bot]`  | Findings explicitly tagged `P3` or lower                                     |
 | `copilot-pull-request-reviewer` | Suggestions framed as style/formatting preferences with no correctness claim |
 
@@ -380,8 +388,30 @@ multi-finding summary posts as an issue comment) have no thread to resolve
 and always land in the ordinary "suppress and leave open" bucket,
 regardless of the bot that authored them.
 
-For each inline finding suppressed above whose thread's first-comment
-author is in the gating set:
+**Correlating a suppressed finding to its thread.** `(path, line, author)` is
+not a unique key: a thread can hold comments from more than one author (a
+human's opening comment followed by a bot's later nit, or the reverse), and a
+single file/line can carry more than one distinct finding from the same bot.
+Matching on that triple risks attaching the reply to the wrong comment.
+Instead, carry forward the identifiers you already have at the moment a
+finding is suppressed in Step 3:
+
+- the suppressed comment's own REST `id` (`comment_id`), from the Step 2
+  inline-comments fetch (`pulls/<N>/comments`)
+- that comment's author login — the login the suppression filter actually
+  matched against, not necessarily the thread's first comment's author
+- the enclosing thread's GraphQL node `id`, found by matching `comment_id`
+  against a comment node's `databaseId` in the Step 2.5 Axis A fetch
+  (`databaseId` is the same value as the REST comment `id` — the join key
+  between the two APIs)
+
+Gating-bot authorship is checked on **this specific suppressed comment**,
+never on the thread's first comment — a thread mixing a human's comment with
+a bot's nit (or the reverse) must not have the wrong one decide whether the
+gating path fires.
+
+For each inline finding suppressed above whose specific comment's author is
+in the gating set:
 
 1. **Reply** on the same thread (not a top-level PR conversation comment —
    it must attach to the thread the bot is gating on) explaining the skip:
@@ -391,13 +421,38 @@ author is in the gating set:
      -f body='Suppressed as cosmetic/nit per project convention — not applying this suggestion.'
    ```
 
-   `<comment_id>` is the REST id of the thread's first comment, already
-   available from the Step 2 inline-comments fetch
-   (`pulls/<N>/comments`) — match it to the thread by path/line/author.
+   `<comment_id>` is the specific suppressed comment's REST id, carried
+   forward from Step 3 as described above — not the thread's first comment.
+   **Before posting, check for an existing reply first** — see § Reply and
+   resolve are independently retryable below; skip straight to step 2 if one
+   is already there.
 
 2. **Resolve** the thread via the same `resolveReviewThread` GraphQL
    mutation documented in Step 4.5 § Procedure, step 3, using the thread's
-   GraphQL node id from the Step 2.5 Axis A fetch.
+   GraphQL node id carried forward from Step 3. Only run this once the reply
+   is confirmed present (either just posted, or found already there).
+
+### Reply and resolve are independently retryable
+
+The reply and the resolve are two separate writes; either can fail without
+the other. If the reply succeeds but the `resolveReviewThread` mutation
+fails (network blip, API error), nothing marks the reply as already posted —
+a naive retry on a later run would post a **second, duplicate reply** before
+attempting resolve again.
+
+Guard against this explicitly:
+
+- **Before posting a reply**, check whether a reply from this skill already
+  exists on the thread — look for a comment whose `body` matches the
+  suppression-reply text above among the thread's comments (the `body` field
+  added to the Step 2.5 Axis A fetch covers this, or fall back to a fresh
+  `pulls/<N>/comments` filtered to `in_reply_to_id == <comment_id>`). If one
+  already exists, do not post again — go straight to resolve.
+- **Only resolve once the reply is confirmed present.**
+- Track the two writes as independent outcomes so Step 5 can report the
+  right state per finding: both landed → `[resolved]`; reply landed but
+  resolve did not → `[pending]` (retry resolve-only next run); the reply
+  itself did not land → `[failed]` (retry from the reply step next run).
 
 **Step 3 only decides which suppressed findings qualify.** The reply and
 resolve above are write actions, not analysis — they execute after triage
@@ -422,15 +477,22 @@ human-authored thread.
 
 #### Worked example
 
-1. CodeRabbit posts an inline comment on `scripts/run.py:42`: "Nitpick:
-   consider extracting this into a helper function."
-2. The suppression filter above matches it (`Nitpick:` prefix, CodeRabbit's
-   bot-specific-patterns row) — no fix-up commit is generated for it.
-3. `coderabbitai[bot]` is in the gating set, so the reply+resolve path
-   fires once triage is done: reply via `.../comments/<comment_id>/replies`
-   with "Suppressed as cosmetic/nit per project convention — not applying
-   this suggestion.", then `resolveReviewThread` on that thread's node id.
-4. The Step 5 summary lists it as `[resolved]` under the suppressed-findings
+1. CodeRabbit posts two separate inline nits on the same line,
+   `scripts/run.py:42`, in the same thread: comment `1001` ("Nitpick:
+   consider extracting this into a helper function") and comment `1002`
+   ("Nit: rename `tmp` to `buffer`") — both authored by `coderabbitai[bot]`.
+2. The suppression filter above matches both (`Nitpick:` / `Nit:` prefix,
+   CodeRabbit's bot-specific-patterns row) — no fix-up commit is generated
+   for either. Each carries forward its own `comment_id` (`1001`, `1002`)
+   and author login, plus the shared thread's GraphQL node id (matched via
+   `databaseId`).
+3. `coderabbitai[bot]` is in the gating set, so the reply+resolve path fires
+   once triage is done, once per suppressed comment: reply on `1001` via
+   `.../comments/1001/replies`, reply on `1002` via `.../comments/1002/replies`
+   — each checked first for an existing reply — then `resolveReviewThread`
+   once on the shared thread's node id (a second resolve call on an
+   already-resolved thread is a no-op).
+4. The Step 5 summary lists both as `[resolved]` under the suppressed-findings
    line, not `[left open]`.
 5. On the next run of this skill (or the next review round), Step 2.5 Axis A
    sees `isResolved == true` for that thread — it drops out of the
@@ -731,10 +793,15 @@ After all PRs are processed, give the user a concise recap:
 - **Findings suppressed by the Step 3 nit/cosmetic filter** — one line per
   suppression with the bot, the file/line ref, and a 6-8 word summary, so
   the user can spot any that should have been kept and ask for them to be
-  re-included. Tag each line with its resolution outcome so the two buckets
-  from § Gating bots: reply + resolve are distinguishable at a glance:
-  - `[resolved]` — inline finding from a gating-set bot: reply posted and
-    thread resolved via the `resolveReviewThread` GraphQL mutation
+  re-included. Tag each line with its resolution outcome so the buckets from
+  § Gating bots: reply + resolve are distinguishable at a glance:
+  - `[resolved]` — inline finding from a gating-set bot: reply confirmed
+    posted and thread resolved via the `resolveReviewThread` GraphQL mutation
+  - `[pending]` — inline finding from a gating-set bot: reply confirmed
+    posted, but the resolve mutation has not yet succeeded (see § Reply and
+    resolve are independently retryable) — will retry resolve-only next run
+  - `[failed]` — inline finding from a gating-set bot: the reply write
+    itself did not succeed — will retry from the reply step next run
   - `[left open]` — everything else: non-gating-set bot, human reviewer, or
     a conversation-stream finding (no thread exists to resolve) — untouched
 - Anything still pending user input
