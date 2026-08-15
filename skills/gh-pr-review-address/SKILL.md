@@ -33,10 +33,14 @@ style issues are part of the workflow — none of those are beneath fixing.
 
 Two categories don't get acted on this PR:
 
-1. **Nit / cosmetic findings** (see § Suppression filter in Step 3) — silently
-   skipped to break the unbounded review-fix-review loop. Each fix-up commit
+1. **Nit / cosmetic findings** (see § Suppression filter in Step 3) — skipped
+   to break the unbounded review-fix-review loop. Each fix-up commit
    re-triggers bot review, which finds more nits, ad infinitum. Suppressing
-   them at intake is the cheapest stop rule.
+   them at intake is the cheapest stop rule. For findings from a **gating
+   bot** — one that blocks its own review verdict until every actionable
+   comment reaches a resolved state, nits included — suppression is paired
+   with a thread reply + resolve so the bot's verdict doesn't stall forever;
+   see § Gating bots: reply + resolve, not fully silent under Step 3.
 2. **Genuinely out-of-scope feedback** — logged as a new GitHub issue rather
    than dropped.
 
@@ -300,9 +304,12 @@ the two axes that follow.
 
 ### Suppression filter (apply first)
 
-Skip findings that match any of these patterns. Suppression is silent — the
-items are still counted and listed in the Step 5 summary so the user can
-override, but they do not generate fix-up commits.
+Skip findings that match any of these patterns. Suppression never generates
+a fix-up commit, and for non-gating bots and all human reviewers it is
+otherwise fully silent — no reply, no resolve. **Findings authored by a
+gating bot are the exception** — see § Gating bots: reply + resolve, not
+fully silent below. Either way, every suppressed item is counted and listed
+in the Step 5 summary so the user can override.
 
 **Bot-specific patterns:**
 
@@ -339,6 +346,65 @@ performance, or security. Concrete examples that get suppressed:
 **When in doubt:** keep the finding. The cost of one extra fix-up commit is
 lower than the cost of shipping a real issue past review because it was
 tagged "nit."
+
+### Gating bots: reply + resolve, not fully silent
+
+Some bots gate their own review verdict on **all** actionable comments
+reaching a resolved state — including ones the bot itself tagged
+nit/trivial. `coderabbitai[bot]` is the confirmed case: it holds
+`CHANGES_REQUESTED` open until every thread it opened is resolved,
+regardless of the severity it assigned (see the `coderabbit` skill § 2). A
+finding suppressed above but never resolved leaves that thread open forever
+from the bot's point of view — it has no way to know the skip was
+intentional, so its verdict never clears even after every substantive
+finding is fixed and pushed. Root-caused on `glitchwerks/claude-configs` PR
+#1106 (2026-07-18): a suppressed "add subprocess timeout" nit, left
+unresolved, alone kept `mergeStateStatus: BLOCKED` for ~35 minutes with no
+re-review.
+
+**Gating bot set:** reuse Step 4.5's bot allow-list (§ Bot allow-list)
+rather than maintaining a second list. `coderabbitai[bot]` is the confirmed
+gating bot; the rest of that same allow-list is treated as gating too — a
+bot already trusted enough to have its fixed threads auto-resolved (Step
+4.5, Mode A/B) is trusted enough to have its suppressed threads
+reply-and-resolved here.
+
+For each finding suppressed above whose thread's first-comment author is in
+that allow-list:
+
+1. **Reply** on the thread explaining the skip, e.g.: "Suppressed as
+   cosmetic/nit per project convention — not applying this suggestion."
+2. **Resolve** the thread via the same `resolveReviewThread` GraphQL
+   mutation documented in Step 4.5 § Procedure, step 3.
+
+**This is a separate path from Step 4.5's Mode A/B resolution**, not a
+variant of it. Mode A/B resolves a thread because a landed commit fixed the
+finding (`isOutdated`-driven). This path resolves a thread because the
+finding was *never going to be fixed* and the bot needs to see that decision
+made explicit. Keep the two apart in bookkeeping — Step 5 reports them on
+separate lines (see Step 5 below).
+
+**Do not force-resolve nits from a bot that is not on the allow-list, or
+from a human reviewer.** Only gating-bot-authored threads get the
+reply+resolve treatment; everything else suppressed above stays untouched —
+this matches Step 4.5's existing rule against ever resolving a
+human-authored thread.
+
+#### Worked example
+
+1. CodeRabbit posts an inline comment on `scripts/run.py:42`: "Nitpick:
+   consider extracting this into a helper function."
+2. The suppression filter above matches it (`Nitpick:` prefix, CodeRabbit's
+   bot-specific-patterns row) — no fix-up commit is generated for it.
+3. `coderabbitai[bot]` is in the Step 4.5 allow-list, so the reply+resolve
+   path fires: reply "Suppressed as cosmetic/nit per project convention —
+   not applying this suggestion.", then `resolveReviewThread` on that
+   thread's node id.
+4. The Step 5 summary lists it as `[resolved]` under the suppressed-findings
+   line, not `[left open]`.
+5. On the next run of this skill (or the next review round), Step 2.5 Axis A
+   sees `isResolved == true` for that thread — it drops out of the
+   unresolved set and is never re-triaged.
 
 ### In scope or out of scope?
 
@@ -473,7 +539,15 @@ conversations that are actually handled, and branch-protection rules that gate
 on "all conversations resolved" can't be satisfied without manual clicks.
 
 If no fix-up commits were pushed (everything was suppressed, out-of-scope, or
-pending discussion), **skip this step** — there is nothing to mark resolved.
+pending discussion), **skip this step** — there is nothing left for *this*
+step to mark resolved.
+
+**This step is not the only path that resolves threads.** Step 3's
+suppression filter has its own independent resolve trigger for gating-bot
+nits (§ Gating bots: reply + resolve, not fully silent) that fires whether
+or not any fix-up commit landed — see that section for the reply-then-resolve
+procedure. Everything below in this step (Mode A/B) covers only threads
+resolved because a fix was actually detected in a landed commit.
 
 ### Two modes
 
@@ -618,8 +692,17 @@ After all PRs are processed, give the user a concise recap:
 - What issues were created for deferred items
 - **Review threads resolved in Step 4.5** — one line:
   "Resolved N of M bot review threads (X were not yet outdated; skipped)."
-  Omit this line if Step 4.5 was skipped (no fix-up commits landed).
-- **Findings suppressed by the Step 3 nit/cosmetic filter** — one line per suppression with the bot, the file/line ref, and a 6-8 word summary so the user can spot any that should have been kept and ask for them to be re-included
+  Omit this line if Step 4.5 was skipped (no fix-up commits landed). This
+  count is Mode A/B (fix-detected) resolutions only — gating-bot suppression
+  resolutions are reported separately, in the line below.
+- **Findings suppressed by the Step 3 nit/cosmetic filter** — one line per
+  suppression with the bot, the file/line ref, and a 6-8 word summary, so
+  the user can spot any that should have been kept and ask for them to be
+  re-included. Tag each line with its resolution outcome so the two buckets
+  from § Gating bots: reply + resolve are distinguishable at a glance:
+  - `[resolved]` — gating-bot finding: reply posted and thread resolved via
+    the `resolveReviewThread` GraphQL mutation
+  - `[left open]` — non-gating bot or human reviewer: thread untouched
 - Anything still pending user input
 
 Keep the summary scannable — the user should be able to confirm everything was
