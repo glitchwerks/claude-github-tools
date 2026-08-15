@@ -353,29 +353,59 @@ Some bots gate their own review verdict on **all** actionable comments
 reaching a resolved state — including ones the bot itself tagged
 nit/trivial. `coderabbitai[bot]` is the confirmed case: it holds
 `CHANGES_REQUESTED` open until every thread it opened is resolved,
-regardless of the severity it assigned (see the `coderabbit` skill § 2). A
-finding suppressed above but never resolved leaves that thread open forever
-from the bot's point of view — it has no way to know the skip was
-intentional, so its verdict never clears even after every substantive
-finding is fixed and pushed. Root-caused on `glitchwerks/claude-configs` PR
-#1106 (2026-07-18): a suppressed "add subprocess timeout" nit, left
-unresolved, alone kept `mergeStateStatus: BLOCKED` for ~35 minutes with no
-re-review.
+regardless of the severity it assigned. A finding suppressed above but
+never resolved leaves that thread open forever from the bot's point of
+view — it has no way to know the skip was intentional, so its verdict
+never clears even after every substantive finding is fixed and pushed.
+Root-caused on `glitchwerks/claude-configs` PR #1106 (2026-07-18): a
+suppressed "add subprocess timeout" nit, left unresolved, alone kept
+`mergeStateStatus: BLOCKED` for ~35 minutes with no re-review.
 
-**Gating bot set:** reuse Step 4.5's bot allow-list (§ Bot allow-list)
-rather than maintaining a second list. `coderabbitai[bot]` is the confirmed
-gating bot; the rest of that same allow-list is treated as gating too — a
-bot already trusted enough to have its fixed threads auto-resolved (Step
-4.5, Mode A/B) is trusted enough to have its suppressed threads
-reply-and-resolved here.
+**Gating bot set:** a subset of Step 4.5's bot allow-list (§ Bot
+allow-list) — reuse that same allow-list mechanism rather than maintaining
+a second list, but do not assume every member gates. Seed the gating set
+with just `coderabbitai[bot]`, the only member with confirmed
+gate-on-full-resolution behavior (#1106). Add another allow-listed bot to
+the gating set only once it's confirmed to behave the same way — an
+unconfirmed bot stays covered by the ordinary "suppress and leave open"
+path below, so "never force-resolve nits from a non-gating bot" (a few
+paragraphs down) still has teeth for `chatgpt-codex-connector[bot]` and
+`copilot-pull-request-reviewer[bot]` until each is individually confirmed.
 
-For each finding suppressed above whose thread's first-comment author is in
-that allow-list:
+**Scope: inline findings only.** This path resolves a GraphQL review
+*thread*, so it only applies to suppressed findings from the **inline**
+stream (Step 2 item #2), which are anchored to a thread. Suppressed
+findings from the **conversation** stream (Step 2 item #3 — where a bot's
+multi-finding summary posts as an issue comment) have no thread to resolve
+and always land in the ordinary "suppress and leave open" bucket,
+regardless of the bot that authored them.
 
-1. **Reply** on the thread explaining the skip, e.g.: "Suppressed as
-   cosmetic/nit per project convention — not applying this suggestion."
+For each inline finding suppressed above whose thread's first-comment
+author is in the gating set:
+
+1. **Reply** on the same thread (not a top-level PR conversation comment —
+   it must attach to the thread the bot is gating on) explaining the skip:
+
+   ```bash
+   gh api repos/<owner>/<repo>/pulls/<N>/comments/<comment_id>/replies \
+     -f body='Suppressed as cosmetic/nit per project convention — not applying this suggestion.'
+   ```
+
+   `<comment_id>` is the REST id of the thread's first comment, already
+   available from the Step 2 inline-comments fetch
+   (`pulls/<N>/comments`) — match it to the thread by path/line/author.
+
 2. **Resolve** the thread via the same `resolveReviewThread` GraphQL
-   mutation documented in Step 4.5 § Procedure, step 3.
+   mutation documented in Step 4.5 § Procedure, step 3, using the thread's
+   GraphQL node id from the Step 2.5 Axis A fetch.
+
+**Step 3 only decides which suppressed findings qualify.** The reply and
+resolve above are write actions, not analysis — they execute after triage
+completes, at the same point Step 4.5 runs (whether or not Step 4.5 itself
+has any Mode A/B fix-detected threads to process), not during this Step 3
+pass. This keeps Step 3 itself read-only, consistent with "triage is
+analysis, not implementation" above and "do not write code, edit files, or
+run commits yourself" in § Your role in this skill.
 
 **This is a separate path from Step 4.5's Mode A/B resolution**, not a
 variant of it. Mode A/B resolves a thread because a landed commit fixed the
@@ -384,8 +414,8 @@ finding was *never going to be fixed* and the bot needs to see that decision
 made explicit. Keep the two apart in bookkeeping — Step 5 reports them on
 separate lines (see Step 5 below).
 
-**Do not force-resolve nits from a bot that is not on the allow-list, or
-from a human reviewer.** Only gating-bot-authored threads get the
+**Do not force-resolve nits from a bot that is not in the gating set, or
+from a human reviewer.** Only gating-bot-authored inline threads get the
 reply+resolve treatment; everything else suppressed above stays untouched —
 this matches Step 4.5's existing rule against ever resolving a
 human-authored thread.
@@ -396,10 +426,10 @@ human-authored thread.
    consider extracting this into a helper function."
 2. The suppression filter above matches it (`Nitpick:` prefix, CodeRabbit's
    bot-specific-patterns row) — no fix-up commit is generated for it.
-3. `coderabbitai[bot]` is in the Step 4.5 allow-list, so the reply+resolve
-   path fires: reply "Suppressed as cosmetic/nit per project convention —
-   not applying this suggestion.", then `resolveReviewThread` on that
-   thread's node id.
+3. `coderabbitai[bot]` is in the gating set, so the reply+resolve path
+   fires once triage is done: reply via `.../comments/<comment_id>/replies`
+   with "Suppressed as cosmetic/nit per project convention — not applying
+   this suggestion.", then `resolveReviewThread` on that thread's node id.
 4. The Step 5 summary lists it as `[resolved]` under the suppressed-findings
    line, not `[left open]`.
 5. On the next run of this skill (or the next review round), Step 2.5 Axis A
@@ -623,7 +653,10 @@ resolve a thread authored by a non-bot (human) reviewer**, in either mode.
 
 - Resolving threads that already have **bot replies** (e.g. a CodeRabbit
   "fixed in commit X" follow-up) — those need their own resolution heuristic.
-- **Auto-replying** to threads with the fix-up commit SHA — separate enhancement.
+- **Auto-replying** to threads with the fix-up commit SHA — separate
+  enhancement. (The suppression-driven reply in Step 3 § Gating bots: reply
+  + resolve is a different, already-sanctioned path — it explains a skip,
+  not a fix, and only fires for gating-bot inline nits.)
 
 ---
 
@@ -700,9 +733,10 @@ After all PRs are processed, give the user a concise recap:
   the user can spot any that should have been kept and ask for them to be
   re-included. Tag each line with its resolution outcome so the two buckets
   from § Gating bots: reply + resolve are distinguishable at a glance:
-  - `[resolved]` — gating-bot finding: reply posted and thread resolved via
-    the `resolveReviewThread` GraphQL mutation
-  - `[left open]` — non-gating bot or human reviewer: thread untouched
+  - `[resolved]` — inline finding from a gating-set bot: reply posted and
+    thread resolved via the `resolveReviewThread` GraphQL mutation
+  - `[left open]` — everything else: non-gating-set bot, human reviewer, or
+    a conversation-stream finding (no thread exists to resolve) — untouched
 - Anything still pending user input
 
 Keep the summary scannable — the user should be able to confirm everything was
