@@ -580,7 +580,7 @@ def main() -> int:
         file=out,
     )
     print("<!-- recent-issues-json", file=out)
-    print(json.dumps(recent_issues), file=out)
+    print(json.dumps(recent_issues).replace("-->", "--\\u003e"), file=out)
     print("-->", file=out)
     out.flush()
     return 0
