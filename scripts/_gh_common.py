@@ -36,17 +36,23 @@ def run_gh_api(
     ``JSONDecodeError`` for bare strings like ``main``.  In that case the
     raw, stripped stdout is returned as a plain Python string.
 
+    When pagination is requested, ``gh`` writes each page as a separate
+    top-level JSON document, concatenated directly to stdout.  Each document
+    is decoded in turn; lists contribute their items to one flattened result
+    list, while non-list values are appended to that result.
+
     When no ``jq`` filter is supplied the full response must be valid
     JSON; a parse failure is a genuine error and is allowed to propagate.
 
     Args:
         path: GitHub API path, e.g. ``repos/owner/repo/issues``.
-        paginate: When True, pass ``--paginate`` to gh so all pages are
-            fetched automatically and merged into a single JSON array.
+        paginate: When True, pass ``--paginate`` to gh, decode every
+            concatenated top-level JSON document, and flatten the decoded
+            values into one list.
         jq: Optional jq filter string. Passed as ``--jq <filter>`` to
-            gh.  When the filter selects a scalar string field, the
-            return value will be a plain Python ``str`` rather than a
-            parsed JSON type.
+            gh. When the filter selects a scalar string field without
+            pagination, the return value will be a plain Python ``str``
+            rather than a parsed JSON type.
 
     Returns:
         Parsed JSON value (dict, list, int, bool, None) or, when a
@@ -76,6 +82,23 @@ def run_gh_api(
             f"gh api {path!r} failed (exit {result.returncode}): "
             f"{result.stderr.strip()}"
         )
+
+    if paginate:
+        decoder = json.JSONDecoder()
+        text = result.stdout
+        index = 0
+        combined: list[Any] = []
+        while index < len(text):
+            while index < len(text) and text[index].isspace():
+                index += 1
+            if index >= len(text):
+                break
+            value, index = decoder.raw_decode(text, index)
+            if isinstance(value, list):
+                combined.extend(value)
+            else:
+                combined.append(value)
+        return combined
 
     try:
         return json.loads(result.stdout)
