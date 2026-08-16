@@ -428,33 +428,44 @@ def fetch_recent_issues(repo: str, limit: int = 10) -> list[dict]:
         dictionaries, or an empty list when ``gh`` fails or returns
         invalid JSON.
     """
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            str(limit),
-            "--search",
-            "sort:updated-desc",
-            "--json",
-            "number,title,updatedAt,labels,body",
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--search",
+                "sort:updated-desc",
+                "--json",
+                "number,title,updatedAt,labels,body",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
     if result.returncode != 0:
         return []
 
     try:
-        return json.loads(result.stdout)
+        issues = json.loads(result.stdout)
     except (json.JSONDecodeError, ValueError):
         return []
+
+    if not isinstance(issues, list) or not all(
+        isinstance(issue, dict) for issue in issues
+    ):
+        return []
+    return issues
 
 
 def build_report_data(
