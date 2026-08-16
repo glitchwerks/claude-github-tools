@@ -43,17 +43,20 @@ through if the user has asked for a different critical set.
 
 ## Step 2 — Summarize recent issue activity
 
-Fetch the 10 most recently updated open issues and write a one-paragraph
-summary. Use `gh issue list` (NOT the `/issues` API endpoint — that
-includes PRs):
-
-```bash
-gh issue list --state open --limit 10 \
-  --search "sort:updated-desc" \
-  --json number,title,updatedAt,labels,body
-```
-
-The `--search "sort:updated-desc"` is load-bearing: without it, `gh issue list` orders by `CREATED_AT` (its default), and the result will be the 10 newest-created open issues rather than the 10 most recently updated — a different set, and not the one the prose summary contract promises.
+Step 1's script output already includes the 10 most recently updated open
+issues — no separate `gh` call needed. Look for an
+`<!-- recent-issues-json ... -->` HTML comment block appended after the
+markdown report; parse the JSON array inside it (each item has `number`,
+`title`, `updatedAt`, `labels`, `body`). This is emitted by
+`fetch_recent_issues()` in `scripts/gh-summary.py`, which internally runs
+`gh issue list --state open --limit 10 --search "sort:updated-desc" --json
+number,title,updatedAt,labels,body` (NOT the `/issues` API endpoint — that
+includes PRs). The `--search "sort:updated-desc"` is load-bearing: without
+it, `gh issue list` orders by `CREATED_AT` (its default), and the result
+would be the 10 newest-created open issues rather than the 10 most recently
+updated — a different set, and not the one the prose summary contract
+promises. Do not re-run `gh issue list` yourself in this step; the script
+already did it.
 
 Then write a short prose paragraph (3–5 sentences) covering:
 
@@ -65,8 +68,8 @@ Render as a section titled `### Recent issue activity` below the
 script's output. Keep it under 6 sentences — the script section is
 where the structural detail lives; this section adds narrative on top.
 
-If `gh issue list` returns an empty array, render the section as a
-single line: `_No open issues with recent activity._`
+If the parsed JSON array is empty, render the section as a single line:
+`_No open issues with recent activity._`
 
 ## Notes
 

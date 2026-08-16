@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -1054,3 +1055,261 @@ class TestGhApiIntegration:
                 pass
         all_calls = [" ".join(c[0][0]) for c in mock_run.call_args_list]
         assert any("milestones" in c for c in all_calls)
+
+
+# ---------------------------------------------------------------------------
+# TestFetchRecentIssues — fetch_recent_issues
+# ---------------------------------------------------------------------------
+
+
+def _make_recent_issue(
+    number: int,
+    title: str,
+    labels: list[str],
+    updated_at: str = "2026-05-01T00:00:00Z",
+    body: str = "",
+) -> dict[str, Any]:
+    """Build a fake ``gh issue list --json`` entry.
+
+    Shaped to match the fields requested by ``fetch_recent_issues``:
+    ``number,title,updatedAt,labels,body``.
+
+    Args:
+        number: Issue number.
+        title: Issue title string.
+        labels: List of label name strings.
+        updated_at: ISO 8601 ``updatedAt`` timestamp string.
+        body: Issue body markdown text.
+
+    Returns:
+        Dict shaped like a ``gh issue list --json`` entry.
+    """
+    return {
+        "number": number,
+        "title": title,
+        "updatedAt": updated_at,
+        "labels": [{"name": lbl} for lbl in labels],
+        "body": body,
+    }
+
+
+class TestFetchRecentIssues:
+    """fetch_recent_issues: gh issue list wrapper for recently-updated issues."""
+
+    def test_happy_path_returns_parsed_list_unchanged(self) -> None:
+        """A JSON array of issue dicts is returned unchanged."""
+        mod = _load_summary()
+        issues = [
+            _make_recent_issue(1, "First issue", ["bug"]),
+            _make_recent_issue(2, "Second issue", ["enhancement"]),
+            _make_recent_issue(3, "Third issue", []),
+        ]
+        cp = _make_completed_process(issues, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == issues
+
+    def test_empty_array_returns_empty_list(self) -> None:
+        """gh returning an empty JSON array yields an empty list."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_gh_failure_fails_soft_to_empty_list(self) -> None:
+        """A non-zero gh exit code fails soft to [] rather than raising."""
+        mod = _load_summary()
+        cp = MagicMock()
+        cp.returncode = 1
+        cp.stdout = ""
+        cp.stderr = "not a git repository"
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_search_sort_updated_desc_flag_passed(self) -> None:
+        """The load-bearing --search 'sort:updated-desc' flag is passed.
+
+        Without it, gh issue list defaults to CREATED_AT ordering, which
+        would silently return the wrong set of issues (see
+        skills/gh-summary/SKILL.md Step 2).
+        """
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        call_args = mock_run.call_args[0][0]
+        assert "--search" in call_args
+        search_index = call_args.index("--search")
+        assert call_args[search_index + 1] == "sort:updated-desc"
+
+    def test_repo_flag_passed_through(self) -> None:
+        """--repo <repo> is passed through for the given repo argument."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("acme/widgets")
+        call_args = mock_run.call_args[0][0]
+        assert "--repo" in call_args
+        repo_index = call_args.index("--repo")
+        assert call_args[repo_index + 1] == "acme/widgets"
+
+    def test_repo_flag_passed_through_for_different_repo(self) -> None:
+        """--repo pass-through works for a second, distinct repo value."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("glitchwerks/claude-github-tools")
+        call_args = mock_run.call_args[0][0]
+        assert "--repo" in call_args
+        repo_index = call_args.index("--repo")
+        assert (
+            call_args[repo_index + 1] == "glitchwerks/claude-github-tools"
+        )
+
+    def test_limit_flag_passed_through_default(self) -> None:
+        """--limit 10 is passed by default (the function's default limit)."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        call_args = mock_run.call_args[0][0]
+        assert "--limit" in call_args
+        limit_index = call_args.index("--limit")
+        assert call_args[limit_index + 1] == "10"
+
+    def test_limit_flag_passed_through_custom_value(self) -> None:
+        """--limit <limit> reflects a caller-supplied non-default limit."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo", limit=3)
+        call_args = mock_run.call_args[0][0]
+        assert "--limit" in call_args
+        limit_index = call_args.index("--limit")
+        assert call_args[limit_index + 1] == "3"
+
+    def test_json_fields_requested_include_all_expected_keys(self) -> None:
+        """The --json flag requests number,title,updatedAt,labels,body."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        call_args = mock_run.call_args[0][0]
+        assert "--json" in call_args
+        json_index = call_args.index("--json")
+        fields = call_args[json_index + 1]
+        for field in ("number", "title", "updatedAt", "labels", "body"):
+            assert field in fields
+
+    def test_state_open_passed(self) -> None:
+        """--state open is passed so closed issues are excluded."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        call_args = mock_run.call_args[0][0]
+        assert "--state" in call_args
+        state_index = call_args.index("--state")
+        assert call_args[state_index + 1] == "open"
+
+    def test_uses_gh_issue_list_subcommand(self) -> None:
+        """The command invoked is `gh issue list`, not the /issues API."""
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        call_args = mock_run.call_args[0][0]
+        assert call_args[0] == "gh"
+        assert "issue" in call_args
+        assert "list" in call_args
+
+    # -----------------------------------------------------------------
+    # Regression coverage: CodeRabbit findings on PR #38
+    #   1. Unbounded subprocess call (no timeout, no
+    #      TimeoutExpired/OSError handling)
+    #   2. No shape validation on parsed JSON
+    # -----------------------------------------------------------------
+
+    def test_timeout_expired_fails_soft_to_empty_list(self) -> None:
+        """A hung `gh` process (TimeoutExpired) fails soft to []."""
+        mod = _load_summary()
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["gh", "issue", "list"], timeout=10
+            ),
+        ):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_os_error_fails_soft_to_empty_list(self) -> None:
+        """A missing/unreachable `gh` binary (OSError) fails soft to []."""
+        mod = _load_summary()
+        with patch(
+            "subprocess.run",
+            side_effect=FileNotFoundError("gh not found"),
+        ):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_subprocess_run_passes_explicit_positive_timeout(self) -> None:
+        """subprocess.run is called with an explicit, positive timeout.
+
+        Without this, a hung `gh` process blocks the caller forever.
+        The exact number isn't pinned -- just that a sane timeout is
+        supplied.
+        """
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        assert "timeout" in mock_run.call_args.kwargs
+        timeout_value = mock_run.call_args.kwargs["timeout"]
+        assert isinstance(timeout_value, (int, float))
+        assert timeout_value > 0
+
+    def test_null_stdout_returns_empty_list(self) -> None:
+        """`gh` returning literal JSON null yields [], not None."""
+        mod = _load_summary()
+        cp = _make_completed_process(None, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_bare_object_stdout_returns_empty_list(self) -> None:
+        """`gh` returning a bare JSON object (not an array) yields []."""
+        mod = _load_summary()
+        cp = _make_completed_process({}, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_list_with_non_dict_item_returns_empty_list(self) -> None:
+        """A list containing a non-dict item rejects the whole response.
+
+        Rather than silently including the malformed entry, the
+        entire response is treated as invalid and [] is returned.
+        """
+        mod = _load_summary()
+        cp = _make_completed_process(
+            [{"number": 1}, None], returncode=0
+        )
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_well_formed_list_of_dicts_still_returned_unchanged(
+        self,
+    ) -> None:
+        """Regression guard: a valid list-of-dicts is unaffected."""
+        mod = _load_summary()
+        issues = [
+            _make_recent_issue(1, "First issue", ["bug"]),
+            _make_recent_issue(2, "Second issue", ["enhancement"]),
+        ]
+        cp = _make_completed_process(issues, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == issues

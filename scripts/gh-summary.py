@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -414,6 +416,58 @@ def render_report(
 # ---------------------------------------------------------------------------
 
 
+def fetch_recent_issues(repo: str, limit: int = 10) -> list[dict]:
+    """Fetch recently updated open issues from a GitHub repository.
+
+    Args:
+        repo: ``owner/name`` string for the target repository.
+        limit: Maximum number of issues to fetch. Defaults to 10.
+
+    Returns:
+        The JSON array returned by ``gh issue list`` as a list of issue
+        dictionaries, or an empty list when ``gh`` fails or returns
+        invalid JSON.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                str(limit),
+                "--search",
+                "sort:updated-desc",
+                "--json",
+                "number,title,updatedAt,labels,body",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    try:
+        issues = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    if not isinstance(issues, list) or not all(
+        isinstance(issue, dict) for issue in issues
+    ):
+        return []
+    return issues
+
+
 def build_report_data(
     repo: str,
 ) -> tuple[
@@ -517,6 +571,7 @@ def main() -> int:
             repo = f"{owner}/{name}"
 
         epics, milestones, open_issues = build_report_data(repo)
+        recent_issues = fetch_recent_issues(repo)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -535,6 +590,9 @@ def main() -> int:
         ),
         file=out,
     )
+    print("<!-- recent-issues-json", file=out)
+    print(json.dumps(recent_issues).replace("-->", "--\\u003e"), file=out)
+    print("-->", file=out)
     out.flush()
     return 0
 
