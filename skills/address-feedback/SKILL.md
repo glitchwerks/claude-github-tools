@@ -111,6 +111,44 @@ findings or run indefinitely.
 }
 ```
 
+**Use `scripts/address-feedback-state.py` for the mechanical parts** — don't
+hand-roll the JSON load/save/cap-check logic:
+
+```bash
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+
+# New run — mint a fresh state object:
+"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/address-feedback-state.py" \
+  init-state "<run_id>" "<owner>/<repo>" "<target>"
+
+# Cap check — pass the loaded state JSON + the two constants:
+"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/address-feedback-state.py" \
+  check-caps "$(cat <repo>/.tmp/address-feedback-pr<N>.json)" "$MAX_TICKS" "$MAX_ACT_ROUNDS"
+# -> {"capped": bool, "reason": "tick_count"|"act_rounds"|null}
+```
+
+`init-state` and `check-caps` are the two CLI subcommands. Loading the file
+from disk, deciding continuation-vs-new-run, and saving are NOT yet
+exposed as subcommands — use the script's `load_state_file` /
+`is_continuation` / `save_state_file` functions directly via a short
+python snippet:
+
+```bash
+"$PY" -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}/scripts')
+import importlib.util
+spec = importlib.util.spec_from_file_location(
+    'address_feedback_state', '${CLAUDE_PLUGIN_ROOT}/scripts/address-feedback-state.py'
+)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+existing = mod.load_state_file('<repo>/.tmp/address-feedback-pr<N>.json')
+print('continuation' if mod.is_continuation(existing, '<owner>/<repo>', '<target>') else 'new-run')
+"
+```
+
 **Run identity — how `run_id` is established and matched.** The entry contract
 supplies only a PR/branch target, not an invocation id, so the state file itself
 *is* the run's identity: the `(owner_repo, target)` pair keys the run, and
@@ -317,48 +355,56 @@ item never blocks quiescence, but an *un-parkable* one does.
 
 ### Merge gates (all required before auto-merge)
 
-Sourced from `CLAUDE.md § Pull Requests`. Auto-merge yields to **every** one:
+Sourced from `CLAUDE.md § Pull Requests`. Auto-merge yields to **every** one.
+Fetch the six raw signals, then run them through
+`scripts/address-feedback-state.py evaluate-merge-gates` instead of
+hand-checking each condition — the script applies the exact 6-gate
+contract deterministically:
 
-- **Live re-fetch immediately before merge** — PR still open, not already merged.
-- **Re-validate effective merge permission at the merge boundary** — ownership by
-  login is **not** sufficient: an owner can still be blocked by branch protection,
-  and a non-owner collaborator may legitimately have merge rights. Query the
-  authenticated user's *effective* permission on the head repo, not just the owner
-  login:
+```bash
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
 
-  ```bash
-  # viewer's permission on the repo (ADMIN / MAINTAIN / WRITE grant merge; READ does not)
-  gh api repos/<owner>/<repo> --jq .permissions
-  # and the PR's own mergeability for the viewer
-  gh pr view <N> --repo <owner>/<repo> --json viewerCanUpdate,mergeStateStatus
-  ```
+# Effective merge permission — re-fetch at the merge boundary (not only tick
+# 1); a repo can be transferred or access revoked mid-loop, so a tick-1
+# check is stale authorization:
+gh api repos/<owner>/<repo> --jq .permissions
+gh pr view <N> --repo <owner>/<repo> --json viewerCanUpdate,mergeStateStatus
 
-  Re-run this at the merge boundary (not only tick 1) — a repo can be transferred
-  or access revoked mid-loop; a tick-1 check is stale authorization. Fail closed
-  if the viewer lacks an effective merge permission.
-- **CI `success` on the actual merge result, not just the PR head.** `gh pr checks
-  <N>` is tied to the head commit and can miss failures on the merged result.
-  Fetch the test-merge / merge-queue sha (`gh pr view <N> --json
-  potentialMergeCommit --jq .potentialMergeCommit.oid`, or the merge-queue commit
-  when a queue is configured) and confirm checks are green **on that commit**
-  before merging.
-- **No `CHANGES_REQUESTED` review** (sibling Axis C) and no unresolved human review
-  threads.
-- **`mergeStateStatus` ∈ {`CLEAN`, `HAS_HOOKS`, `UNSTABLE`}** — never `DIRTY`,
-  `BLOCKED`, or `BEHIND`.
-- **No `DO NOT MERGE` banner** in the PR body.
-- **Merge queues only enqueue — do not report "merged" on enqueue.** When a merge
-  queue is configured, `gh pr merge` / `merge_pull_request` may enable auto-merge
-  or **add the PR to the queue** instead of producing a merge commit immediately.
-  Do **not** treat the enqueue response as "merged" and do **not** `stop` yet:
-  re-fetch until `state == MERGED` with a non-null `mergedAt` (or the queue reports
-  the PR merged), and only then report **merged** with the merge sha. If the queue
-  rejects the PR (falls out on a failing required check), downgrade to
-  stop-and-report. Treat "enqueued, awaiting queue CI" as a WAIT, not an EXIT.
+# CI status on the actual merge result, not just the PR head — gh pr checks
+# <N> is tied to the head commit and can miss failures on the merged
+# result. Fetch the test-merge sha and confirm checks are green on THAT
+# commit:
+gh pr view <N> --repo <owner>/<repo> --json potentialMergeCommit --jq .potentialMergeCommit.oid
 
-**Any gate fails ⇒ downgrade the exit to stop-and-report.** Surface which gate
-failed, leave the PR open, and `stop`. Never merge on a failed gate — even to
-"finish the loop".
+# Build the signals object and evaluate all 6 gates in one call:
+"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/address-feedback-state.py" \
+  evaluate-merge-gates '{"pr_state": "...", "merged_at": null, "viewer_permission": "...", "viewer_can_update": true, "merge_commit_ci_conclusion": "...", "has_changes_requested": false, "unresolved_human_thread_count": 0, "merge_state_status": "...", "pr_body": "..."}'
+# -> {"gates": [{"name", "passed", "detail"}, ...], "all_passed": bool}
+```
+
+The six gates: PR still open and not already merged; effective merge
+permission (`ADMIN`/`MAINTAIN`/`WRITE` + `viewerCanUpdate`); CI `success`
+on the merge commit; no `CHANGES_REQUESTED` review (sibling Axis C) and no
+unresolved human review threads; `mergeStateStatus` ∈ {`CLEAN`,
+`HAS_HOOKS`, `UNSTABLE`} (never `DIRTY`/`BLOCKED`/`BEHIND`); no `DO NOT
+MERGE` banner in the PR body.
+
+**Any gate fails ⇒ downgrade the exit to stop-and-report.** Read
+`all_passed` — if `false`, surface the failing gate(s) by name (from
+`gates[].detail`), leave the PR open, and `stop`. Never merge on a failed
+gate — even to "finish the loop".
+
+**Merge queues only enqueue — do not report "merged" on enqueue.** This is
+a separate process step, not one of the 6 gates above. When a merge queue
+is configured, `gh pr merge` / `merge_pull_request` may enable auto-merge
+or **add the PR to the queue** instead of producing a merge commit
+immediately. Do **not** treat the enqueue response as "merged" and do
+**not** `stop` yet: re-fetch until `state == MERGED` with a non-null
+`mergedAt` (or the queue reports the PR merged), and only then report
+**merged** with the merge sha. If the queue rejects the PR (falls out on a
+failing required check), downgrade to stop-and-report. Treat "enqueued,
+awaiting queue CI" as a WAIT, not an EXIT.
 
 ### Loop guards (runaway protection)
 
