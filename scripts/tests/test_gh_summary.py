@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -1223,3 +1224,92 @@ class TestFetchRecentIssues:
         assert call_args[0] == "gh"
         assert "issue" in call_args
         assert "list" in call_args
+
+    # -----------------------------------------------------------------
+    # Regression coverage: CodeRabbit findings on PR #38
+    #   1. Unbounded subprocess call (no timeout, no
+    #      TimeoutExpired/OSError handling)
+    #   2. No shape validation on parsed JSON
+    # -----------------------------------------------------------------
+
+    def test_timeout_expired_fails_soft_to_empty_list(self) -> None:
+        """A hung `gh` process (TimeoutExpired) fails soft to []."""
+        mod = _load_summary()
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=["gh", "issue", "list"], timeout=10
+            ),
+        ):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_os_error_fails_soft_to_empty_list(self) -> None:
+        """A missing/unreachable `gh` binary (OSError) fails soft to []."""
+        mod = _load_summary()
+        with patch(
+            "subprocess.run",
+            side_effect=FileNotFoundError("gh not found"),
+        ):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_subprocess_run_passes_explicit_positive_timeout(self) -> None:
+        """subprocess.run is called with an explicit, positive timeout.
+
+        Without this, a hung `gh` process blocks the caller forever.
+        The exact number isn't pinned -- just that a sane timeout is
+        supplied.
+        """
+        mod = _load_summary()
+        cp = _make_completed_process([], returncode=0)
+        with patch("subprocess.run", return_value=cp) as mock_run:
+            mod.fetch_recent_issues("owner/repo")
+        assert "timeout" in mock_run.call_args.kwargs
+        timeout_value = mock_run.call_args.kwargs["timeout"]
+        assert isinstance(timeout_value, (int, float))
+        assert timeout_value > 0
+
+    def test_null_stdout_returns_empty_list(self) -> None:
+        """`gh` returning literal JSON null yields [], not None."""
+        mod = _load_summary()
+        cp = _make_completed_process(None, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_bare_object_stdout_returns_empty_list(self) -> None:
+        """`gh` returning a bare JSON object (not an array) yields []."""
+        mod = _load_summary()
+        cp = _make_completed_process({}, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_list_with_non_dict_item_returns_empty_list(self) -> None:
+        """A list containing a non-dict item rejects the whole response.
+
+        Rather than silently including the malformed entry, the
+        entire response is treated as invalid and [] is returned.
+        """
+        mod = _load_summary()
+        cp = _make_completed_process(
+            [{"number": 1}, None], returncode=0
+        )
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == []
+
+    def test_well_formed_list_of_dicts_still_returned_unchanged(
+        self,
+    ) -> None:
+        """Regression guard: a valid list-of-dicts is unaffected."""
+        mod = _load_summary()
+        issues = [
+            _make_recent_issue(1, "First issue", ["bug"]),
+            _make_recent_issue(2, "Second issue", ["enhancement"]),
+        ]
+        cp = _make_completed_process(issues, returncode=0)
+        with patch("subprocess.run", return_value=cp):
+            result = mod.fetch_recent_issues("owner/repo")
+        assert result == issues
