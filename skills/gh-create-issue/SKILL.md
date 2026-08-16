@@ -53,37 +53,45 @@ the next.
 - Scan for documentation files (`docs/`, `DESIGN.md`, `ADR.md`, etc.) that
   touch the issue area — note anything that may need updating if this work ships
 
-### Existing Issues and PRs
+### Existing Issues, PRs, Labels, and Milestones
 
-Run these directly in parallel using `gh`:
+Run the deterministic script once instead of the four/five separate `gh`
+calls this used to take — it emits one JSON payload with everything below:
 
 ```bash
-# Search for overlap
-gh issue list --repo <owner>/<repo> --search '<keywords from description>' --json number,title,state
-
-# List all open issues
-gh issue list --repo <owner>/<repo> --state open --json number,title,labels
-
-# List all open PRs
-gh pr list --repo <owner>/<repo> --state open --json number,title,headRefName
-
-# Fetch available labels
-gh label list --repo <owner>/<repo> --json name,description
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/gh-create-issue-context.py" --search '<keywords from description>'
 ```
 
-If you find significant overlap, flag it before proceeding:
+Omit `--search` (or pass `--search ''`) when there are no useful keywords
+yet — `overlap_search` comes back as an empty list and the script skips
+that call entirely rather than wasting a `gh` round-trip. Pass `--repo
+<owner>/<repo>` to target a repo other than the current directory's.
+
+The script prints one JSON object to stdout:
+
+```json
+{
+  "overlap_search": [...],
+  "open_issues": [...],
+  "open_prs": [...],
+  "labels": [...],
+  "milestones": [...]
+}
+```
+
+Parse it directly — do not re-fetch any of these with your own `gh` call.
+If the script exits non-zero, surface its stderr and stop.
+
+**Overlap is still your judgment call**, not the script's — `overlap_search`
+only surfaces keyword-matched candidates. Read each candidate's title/body
+and decide whether it's genuinely the same request before flagging it. If
+you find significant overlap, flag it before proceeding:
 
 > "I found an existing issue/PR that covers similar ground: #N — [title].
 > Would you like to proceed with a new issue, link to that one, or update it
 > instead?"
-
-### Labels and Milestones
-
-The queries above fetch labels. For milestones, run:
-
-```bash
-gh api repos/<owner>/<repo>/milestones --jq '.[] | {number, title, state}'
-```
 
 ---
 
