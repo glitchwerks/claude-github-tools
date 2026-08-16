@@ -20,7 +20,8 @@ _HUNK_HEADER_RE: re.Pattern[str] = re.compile(
     r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@",
     re.MULTILINE,
 )
-_CODEX_PRIORITY_RE: re.Pattern[str] = re.compile(r"\bP[3-9]\b")
+# The P10-P19 upper bound is intentional: test_p30_does_not_falsely_match_p3 pins P30 as non-matching.
+_CODEX_PRIORITY_RE: re.Pattern[str] = re.compile(r"\bP(?:[3-9]|1\d)\b")
 _CLAUDE_JSON_LOW_RE: re.Pattern[str] = re.compile(
     r'"tier"\s*:\s*"low"', re.IGNORECASE
 )
@@ -97,9 +98,20 @@ def _commit_touches_thread(
         return False
 
     comments = thread["comments"]["nodes"]
-    created_at = _parse_iso8601(comments[0]["createdAt"])
+    if not comments:
+        return False
+
+    try:
+        created_at = _parse_iso8601(comments[0]["createdAt"])
+    except ValueError:
+        return False
+
     for commit in commits:
-        if _parse_iso8601(commit["date"]) <= created_at:
+        try:
+            commit_date = _parse_iso8601(commit["date"])
+        except ValueError:
+            continue
+        if commit_date <= created_at:
             continue
         for changed_file in commit.get("files", []):
             if changed_file.get("filename") != thread["path"]:
@@ -123,9 +135,16 @@ def _sticky_blockers(reviews: list[dict[str, Any]]) -> list[str]:
     for review in reviews:
         login = review["user"]["login"]
         current = latest_by_login.get(login)
-        if current is None or _parse_iso8601(
-            review["submitted_at"]
-        ) > _parse_iso8601(current["submitted_at"]):
+        try:
+            submitted_at = _parse_iso8601(review["submitted_at"])
+            current_submitted_at = (
+                _parse_iso8601(current["submitted_at"])
+                if current is not None
+                else None
+            )
+        except ValueError:
+            continue
+        if current_submitted_at is None or submitted_at > current_submitted_at:
             latest_by_login[login] = review
 
     return [
@@ -242,7 +261,7 @@ def filter_resolvable_threads(
     threads: list[dict[str, Any]],
     mode: str = "B",
     bot_allowlist: set[str] | None = None,
-) -> dict[str, list[Any]]:
+) -> dict[str, list[str]]:
     """Select unresolved bot-authored threads eligible for resolution.
 
     Args:
@@ -253,14 +272,18 @@ def filter_resolvable_threads(
             the supported review bots when None.
 
     Returns:
-        Input-ordered list of resolvable thread identifiers.
+        Mapping containing an input-ordered list of resolvable thread
+        identifiers.
     """
     effective_allowlist = (
         _DEFAULT_BOT_ALLOWLIST if bot_allowlist is None else bot_allowlist
     )
-    resolvable_thread_ids: list[Any] = []
+    resolvable_thread_ids: list[str] = []
     for thread in threads:
-        author_login = thread["comments"]["nodes"][0]["author"]["login"]
+        comments = thread["comments"]["nodes"]
+        if not comments:
+            continue
+        author_login = comments[0]["author"]["login"]
         if thread["isResolved"]:
             continue
         if author_login not in effective_allowlist:
@@ -333,22 +356,33 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
-    input_data = json.load(sys.stdin)
+    try:
+        input_data = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid JSON input: {exc}", file=sys.stderr)
+        return 2
 
-    if args.command == "resolution-state":
-        result = compute_resolution_state(
-            threads=input_data["threads"],
-            commits=input_data["commits"],
-            reviews=input_data["reviews"],
+    try:
+        if args.command == "resolution-state":
+            result = compute_resolution_state(
+                threads=input_data["threads"],
+                commits=input_data["commits"],
+                reviews=input_data["reviews"],
+            )
+        elif args.command == "suppression-candidates":
+            result = classify_suppression_candidates(
+                comments=input_data["comments"]
+            )
+        else:
+            result = filter_resolvable_threads(
+                threads=input_data["threads"], mode=args.mode
+            )
+    except KeyError as exc:
+        print(
+            f"error: missing required input field: {exc.args[0]}",
+            file=sys.stderr,
         )
-    elif args.command == "suppression-candidates":
-        result = classify_suppression_candidates(
-            comments=input_data["comments"]
-        )
-    else:
-        result = filter_resolvable_threads(
-            threads=input_data["threads"], mode=args.mode
-        )
+        return 2
 
     emit_output(result)
     return 0
