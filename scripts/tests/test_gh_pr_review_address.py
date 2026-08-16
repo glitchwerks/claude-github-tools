@@ -30,9 +30,12 @@ pure-function tests — matching the pattern used in
 from __future__ import annotations
 
 import importlib.util
+import io
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
@@ -1214,3 +1217,232 @@ class TestCliSubcommandWiring:
         with pytest.raises(SystemExit) as exc:
             self.mod.main(["not-a-real-subcommand"])
         assert exc.value.code != 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: code-reviewer gaps on PR #40 (issue follow-up)
+#
+# These four groups pin gaps a code-reviewer pass found that the 52
+# pre-existing tests above did not catch:
+#
+# 1. The Codex priority-tag suppression regex only matches P3-P9, so a
+#    P10+ tag is not suppressed even though it should be treated the
+#    same as any other low-priority tag.
+# 2. ``filter_resolvable_threads`` indexes ``comments.nodes[0]`` without
+#    checking for an empty list, raising IndexError on a commentless
+#    thread instead of simply excluding it.
+# 3. The Axis B helper (``_commit_touches_thread``) makes the same
+#    unchecked ``comments.nodes[0]`` access, raising IndexError instead
+#    of treating a commentless thread as OPEN (there is no comment
+#    timestamp to compare a commit date against).
+# 4. ``main()`` has no error handling around ``json.load(sys.stdin)`` or
+#    the required-key lookups on the parsed payload, so malformed input
+#    surfaces as a raw, unhandled traceback instead of a clean non-zero
+#    exit with a stderr message.
+# ---------------------------------------------------------------------------
+
+
+class TestCodexPriorityTagSuppressionP10Plus:
+    """The Codex priority-tag suppression rule must also cover
+    double-digit (P10+) priority tags, not just the single-digit P3-P9
+    range the current regex encodes."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_p10_tag_suppressed(self) -> None:
+        """A body tagged P10 is suppressed, the same as P3-P9.
+
+        Currently FAILS: ``_CODEX_PRIORITY_RE`` is ``\\bP[3-9]\\b``,
+        which requires a single digit and never matches 'P10'.
+        """
+        comments = [
+            _make_review_comment(
+                60,
+                "chatgpt-codex-connector[bot]",
+                "Low priority (P10): consider a docstring tweak.",
+            )
+        ]
+        result = self.mod.classify_suppression_candidates(comments)
+        assert result[0]["suppress_candidate"] is True
+
+    def test_p15_tag_suppressed(self) -> None:
+        """A body tagged P15 is also suppressed.
+
+        Currently FAILS for the same reason as the P10 case above.
+        """
+        comments = [
+            _make_review_comment(
+                61,
+                "chatgpt-codex-connector[bot]",
+                "P15 - cosmetic naming nit.",
+            )
+        ]
+        result = self.mod.classify_suppression_candidates(comments)
+        assert result[0]["suppress_candidate"] is True
+
+
+class TestFilterResolvableThreadsEmptyComments:
+    """A thread with no comment nodes must be excluded from the
+    resolvable set, not crash the enumeration."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_thread_with_no_comments_is_excluded_not_crashed(self) -> None:
+        """A thread whose 'comments.nodes' list is empty is skipped
+        (treated as non-matching) rather than raising IndexError while
+        looking up the first comment's author.
+
+        Currently FAILS: ``filter_resolvable_threads`` accesses
+        ``thread["comments"]["nodes"][0]`` unconditionally, so this
+        fixture raises IndexError instead of returning cleanly.
+        """
+        thread = _make_filter_thread(
+            "F10",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login=_DEFAULT_ALLOWLISTED_BOT,
+        )
+        thread["comments"] = {"nodes": []}
+        result = self.mod.filter_resolvable_threads([thread], mode="B")
+        assert result["resolvable_thread_ids"] == []
+
+
+class TestCommitTouchesThreadEmptyComments:
+    """The Axis B commit-touch helper must not crash on a thread with
+    no comment nodes; per the fix contract, it treats such a thread as
+    not-touched (OPEN), since there is no comment timestamp available
+    to compare a commit date against."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_no_comments_returns_false_not_indexerror(self) -> None:
+        """``_commit_touches_thread`` returns False (not-touched) for a
+        thread with an empty 'comments.nodes' list, instead of raising
+        IndexError while reading the first comment's timestamp.
+
+        Currently FAILS: the helper does
+        ``comments[0]["createdAt"]`` unconditionally.
+        """
+        thread = {"path": "src/foo.py", "comments": {"nodes": []}}
+        commits = [
+            _make_commit(
+                "abc123",
+                "2026-08-02T00:00:00Z",
+                [{"filename": "src/foo.py", "patch": _PATCH_SINGLE_HUNK}],
+            )
+        ]
+        assert self.mod._commit_touches_thread(thread, commits, 12) is False
+
+    def test_no_comments_thread_classified_open_via_public_api(self) -> None:
+        """Through the public ``compute_resolution_state`` entry point, a
+        commentless, non-outdated, unresolved thread with a
+        line-touching commit is classified OPEN rather than crashing —
+        pinning the 'treated as OPEN' contract end to end.
+
+        Currently FAILS: the underlying IndexError propagates out of
+        ``compute_resolution_state`` instead of yielding OPEN.
+        """
+        thread = _make_thread(
+            "T8",
+            is_resolved=False,
+            is_outdated=False,
+            path="src/foo.py",
+            line=12,
+            original_line=12,
+            comments=[],
+        )
+        commit = _make_commit(
+            "abc123",
+            "2026-08-02T00:00:00Z",
+            [{"filename": "src/foo.py", "patch": _PATCH_SINGLE_HUNK}],
+        )
+        result = self.mod.compute_resolution_state(
+            threads=[thread], commits=[commit], reviews=[]
+        )
+        assert result["threads"][0]["classification"] == "OPEN"
+
+
+class TestCliMalformedStdinHandling:
+    """main() must handle malformed stdin JSON and missing required
+    payload keys as clean CLI errors (non-zero exit, stderr message),
+    not let raw exceptions escape as unhandled tracebacks."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    @staticmethod
+    def _run_main_capturing_exit(mod: ModuleType, argv: list[str]) -> Any:
+        """Run main() and return its exit signal, whichever shape it
+        takes.
+
+        ``main()``'s documented contract is to *return* an int exit
+        code; ``sys.exit(main())`` only wraps that in the
+        ``if __name__ == "__main__"`` block, which direct calls to
+        ``main()`` never execute. A correct error-handling fix may
+        legitimately choose either ``return <nonzero>`` or
+        ``sys.exit(<nonzero>)`` internally, so this helper accepts
+        either without pinning one implementation shape.
+
+        Args:
+            mod: The loaded gh_pr_review_address module.
+            argv: CLI arguments to pass to ``main()``.
+
+        Returns:
+            The int exit code, from either a direct return value or a
+            caught ``SystemExit``'s code.
+        """
+        try:
+            return mod.main(argv)
+        except SystemExit as exc:
+            return exc.code
+
+    def test_invalid_json_on_stdin_exits_nonzero_with_clear_message(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Invalid JSON on stdin produces a non-zero exit (by return
+        value or SystemExit) and a clear stderr message, not an
+        unhandled JSONDecodeError traceback.
+
+        Currently FAILS: ``main()`` calls ``json.load(sys.stdin)`` with
+        no surrounding error handling, so this fixture lets a raw
+        ``json.JSONDecodeError`` escape instead of signaling a clean
+        non-zero exit.
+        """
+        monkeypatch.setattr(sys, "stdin", io.StringIO("not valid json {{{"))
+        exit_code = self._run_main_capturing_exit(
+            self.mod, ["suppression-candidates"]
+        )
+        assert exit_code not in (0, None)
+        captured = capsys.readouterr()
+        assert captured.err.strip() != ""
+
+    def test_missing_required_key_exits_nonzero_naming_the_field(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Valid JSON missing a required top-level key (here,
+        'resolution-state' invoked with only 'threads', missing
+        'commits' and 'reviews') exits non-zero (by return value or
+        SystemExit) and identifies a missing field on stderr, instead
+        of raising a bare KeyError.
+
+        Currently FAILS: ``main()`` indexes
+        ``input_data["commits"]`` / ``input_data["reviews"]`` directly,
+        so this fixture lets a raw ``KeyError`` escape instead of
+        signaling a clean, descriptive non-zero exit.
+        """
+        monkeypatch.setattr(
+            sys, "stdin", io.StringIO(json.dumps({"threads": []}))
+        )
+        exit_code = self._run_main_capturing_exit(
+            self.mod, ["resolution-state"]
+        )
+        assert exit_code not in (0, None)
+        captured = capsys.readouterr()
+        assert ("commits" in captured.err) or ("reviews" in captured.err)

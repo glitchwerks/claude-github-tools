@@ -178,12 +178,19 @@ HEAD_SHA=$(gh pr view <N> --repo <owner>/<repo> --json headRefOid --jq .headRefO
 
 ### Fetch the raw inputs (Axis A/B/C source data)
 
+```bash
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+```
+
 `isResolved` / `isOutdated` live ONLY in the GraphQL `reviewThreads` API, never
-in REST. Fetch them — dump to a file, since these responses get large and `jq`
-is not on every host; parse with python:
+in REST. Fetch them, extracting the `nodes` array server-side with `--jq` so
+the dumped file is directly the list the script expects — **not** the full
+response envelope:
 
 ```bash
-gh api graphql -f owner=<owner> -f repo=<repo> -F number=<N> -f query='
+gh api graphql -f owner=<owner> -f repo=<repo> -F number=<N> --jq \
+  '.data.repository.pullRequest.reviewThreads.nodes' -f query='
   query($owner:String!,$repo:String!,$number:Int!){
     repository(owner:$owner,name:$repo){
       pullRequest(number:$number){
@@ -206,19 +213,33 @@ guessing from `path`/`line`/`author` alone. `body` is included so the same
 fetch can also detect an existing reply (see § Reply and resolve are
 independently retryable).
 
-Paginate past 100 with the `pageInfo` cursor rather than silently truncating.
+Paginate past 100 with the `pageInfo` cursor rather than silently truncating
+(the `--jq` filter above still applies per page; merge the `nodes` arrays
+across pages before writing the file).
 
-Also fetch the PR's commits (with dates) and each commit's per-file patch,
-and its reviews:
+Also fetch the PR's commits (with dates), then merge each commit's per-file
+patches into the same record — the resolution-state script needs `files`
+present on every commit object, so this MUST be one merged file, not two
+separate fetches left unjoined:
 
 ```bash
 # commits (with dates) on the PR
 gh api repos/<owner>/<repo>/pulls/<N>/commits --jq \
   '[.[] | {sha:.sha, date:.commit.committer.date}]' > .tmp/pr<N>-commits.json
-# per candidate commit, its file patches (repeat per commit sha, or fetch
-# in bulk if the PR is small — merge into a "files" array per commit)
-gh api repos/<owner>/<repo>/commits/<sha> --jq \
-  '{sha:.sha, date:.commit.committer.date, files:[.files[] | {filename, patch}]}'
+# merge each commit's file patches into the same record (loop + python,
+# since jq is not guaranteed on every host)
+"$PY" -c "
+import json, subprocess
+commits = json.load(open('.tmp/pr<N>-commits.json'))
+for c in commits:
+    out = subprocess.run(
+        ['gh', 'api', f'repos/<owner>/<repo>/commits/{c[\"sha\"]}', '--jq',
+         '[.files[] | {filename, patch}]'],
+        capture_output=True, text=True, check=True,
+    )
+    c['files'] = json.loads(out.stdout)
+json.dump(commits, open('.tmp/pr<N>-commits.json', 'w'))
+"
 # reviews
 gh api repos/<owner>/<repo>/pulls/<N>/reviews --jq \
   '[.[] | {user:{login:.user.login}, state:.state, submitted_at:.submitted_at, commit_id:.commit_id}]' \
@@ -232,9 +253,7 @@ yourself — `scripts/gh-pr-review-address.py resolution-state` computes all
 three axes deterministically from the fetched JSON:
 
 ```bash
-PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
-[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
-python -c "
+"$PY" -c "
 import json
 threads = json.load(open('.tmp/pr<N>-threads.json'))  # nodes list
 commits = json.load(open('.tmp/pr<N>-commits.json'))   # with files/patch merged in
@@ -353,9 +372,11 @@ echo '{"comments": [{"comment_id": 1001, "author_login": "coderabbitai[bot]", "b
 ```
 
 Feed it the **inline** finding stream (Step 2 item #2) as
-`{"comments": [{"comment_id", "author_login", "body"}, ...]}`. It returns
-per-comment `{"comment_id", "author_login", "suppress_candidate": bool,
-"matched_rule": str|null}`. Treat `suppress_candidate: true` as a strong
+`{"comments": [...]}`, where each comment object has `comment_id`,
+`author_login`, and `body` keys (as in the example above). It returns one
+object per comment with `comment_id`, `author_login`, `suppress_candidate`
+(bool), and `matched_rule` (string, or `null` when not suppressed). Treat
+`suppress_candidate: true` as a strong
 signal, not an auto-suppress — the cross-bot judgment pass below still
 applies on top of it, and a candidate can still be kept if it's actually
 substantive (see "Always keep" below). The script only covers the inline
@@ -690,12 +711,19 @@ prompt), since it resolves threads GitHub has not yet flagged as outdated.
 
 ### Bot allow-list
 
-Only ever resolve threads authored by a configured **review bot**. Initialize the
-allow-list to the same bots the Step 3 suppression filter recognizes:
+Only ever resolve threads authored by a configured **review bot**. The
+default allow-list (`_DEFAULT_BOT_ALLOWLIST` in the script):
 
 - `chatgpt-codex-connector[bot]`
 - `coderabbitai[bot]`
 - `copilot-pull-request-reviewer[bot]`
+
+**Known gap:** Step 3's suppression filter also recognizes
+`claude-action-runner[bot]`, but this resolver allow-list doesn't include
+it yet — a suppressed Claude-runner finding can't currently be
+auto-resolved via Step 4.5 even though it's suppressed at intake. Tracked
+as a follow-up; until fixed, treat a Claude-runner-authored thread as
+needing the pre-script manual check if you want it resolved this run.
 
 The allow-list is configurable at the function level
 (`filter_resolvable_threads`'s `bot_allowlist` parameter) — the CLI
