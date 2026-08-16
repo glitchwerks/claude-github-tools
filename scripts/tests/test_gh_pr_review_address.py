@@ -1446,3 +1446,438 @@ class TestCliMalformedStdinHandling:
         assert exit_code not in (0, None)
         captured = capsys.readouterr()
         assert ("commits" in captured.err) or ("reviews" in captured.err)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: CodeRabbit review gaps on PR #40 (second follow-up)
+#
+# These two groups pin gaps CodeRabbit's review found beyond the four
+# above:
+#
+# 5. ``_suppression_rule`` recognizes ``claude-action-runner[bot]`` as a
+#    bot with its own suppression pattern, but
+#    ``_DEFAULT_BOT_ALLOWLIST`` (consulted by ``filter_resolvable_threads``
+#    when no explicit ``bot_allowlist`` is supplied) omits that login, so
+#    an otherwise-eligible claude-action-runner[bot] thread is silently
+#    excluded from the resolvable set under the default allowlist.
+# 6. ``filter_resolvable_threads``'s ``mode`` parameter is not validated:
+#    any value other than the exact strings ``"A"`` or ``"B"`` (e.g. a
+#    lowercase ``"b"`` or an unrecognized ``"X"``) falls through the
+#    ``mode == "B"`` check and silently behaves like Mode A (no outdated
+#    requirement applied) instead of being rejected as a programmer
+#    error.
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultAllowlistIncludesClaudeActionRunner:
+    """The default bot allow-list consulted by ``filter_resolvable_threads``
+    must include ``claude-action-runner[bot]``, matching the bot logins
+    ``_suppression_rule`` already recognizes."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_claude_action_runner_thread_included_under_default_allowlist(
+        self,
+    ) -> None:
+        """An unresolved, outdated thread first-authored by
+        'claude-action-runner[bot]' is included by
+        ``filter_resolvable_threads`` when called with the default
+        allow-list (no ``bot_allowlist`` override) in Mode B.
+
+        Currently FAILS: ``_DEFAULT_BOT_ALLOWLIST`` does not contain
+        'claude-action-runner[bot]', even though ``_suppression_rule``
+        treats it as a recognized bot with its own suppression pattern,
+        so this otherwise-eligible thread is excluded.
+        """
+        thread = _make_filter_thread(
+            "F11",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login="claude-action-runner[bot]",
+        )
+        result = self.mod.filter_resolvable_threads([thread], mode="B")
+        assert result["resolvable_thread_ids"] == ["F11"]
+
+    def test_claude_action_runner_thread_included_with_default_mode_too(
+        self,
+    ) -> None:
+        """The same fixture is included when the ``mode`` argument is
+        also omitted (Mode B is the default per the existing contract).
+
+        Currently FAILS for the same allow-list omission as above.
+        """
+        thread = _make_filter_thread(
+            "F12",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login="claude-action-runner[bot]",
+        )
+        result = self.mod.filter_resolvable_threads([thread])
+        assert result["resolvable_thread_ids"] == ["F12"]
+
+
+class TestFilterResolvableThreadsModeValidation:
+    """``filter_resolvable_threads`` must reject any ``mode`` value other
+    than the exact strings 'A' or 'B' as a programmer error, rather than
+    silently falling through to Mode A behavior."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_lowercase_b_mode_raises_value_error(self) -> None:
+        """A lowercase 'b' mode raises ValueError instead of silently
+        behaving like Mode A.
+
+        Currently FAILS: the implementation only special-cases the exact
+        string 'B'; any other value (including 'b') falls through the
+        ``mode == "B"`` check with no outdated requirement applied, so
+        no exception is raised and an otherwise-eligible not-yet-outdated
+        thread is wrongly included.
+        """
+        thread = _make_filter_thread(
+            "F13",
+            is_resolved=False,
+            is_outdated=False,
+            first_author_login=_DEFAULT_ALLOWLISTED_BOT,
+        )
+        with pytest.raises(ValueError):
+            self.mod.filter_resolvable_threads([thread], mode="b")
+
+    def test_unrecognized_mode_raises_value_error(self) -> None:
+        """An unrecognized mode value ('X') raises ValueError instead of
+        silently behaving like Mode A.
+
+        Currently FAILS for the same fall-through reason as the
+        lowercase-'b' case above.
+        """
+        thread = _make_filter_thread(
+            "F14",
+            is_resolved=False,
+            is_outdated=False,
+            first_author_login=_DEFAULT_ALLOWLISTED_BOT,
+        )
+        with pytest.raises(ValueError):
+            self.mod.filter_resolvable_threads([thread], mode="X")
+
+    def test_valid_modes_do_not_raise(self) -> None:
+        """The two valid mode values, 'A' and 'B', must not raise, so the
+        new validation does not regress the existing contract."""
+        thread = _make_filter_thread(
+            "F15",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login=_DEFAULT_ALLOWLISTED_BOT,
+        )
+        self.mod.filter_resolvable_threads([thread], mode="A")
+        self.mod.filter_resolvable_threads([thread], mode="B")
+
+
+# ---------------------------------------------------------------------------
+# Regression + coverage tests: test-implementer pass on issue #34's
+# follow-up briefing.
+#
+# The briefing that motivated this pass described eight known bugs, but
+# six of them are already fixed and/or already pinned by the test classes
+# above (added in a prior commit on this branch, between the briefing's
+# stated PR head and this branch's actual current head):
+#
+#   1. Codex P10+ priority regex     -> fixed; pinned by
+#      TestCodexPriorityTagSuppressionP10Plus (P20+/P30+ deliberately
+#      excluded — see the source comment above ``_CODEX_PRIORITY_RE`` and
+#      ``test_p30_does_not_falsely_match_p3`` above, which this pass does
+#      not touch or contradict).
+#   2. Empty comments.nodes in filter_resolvable_threads -> fixed; pinned
+#      by TestFilterResolvableThreadsEmptyComments.
+#   3. Empty comments.nodes in _commit_touches_thread -> fixed; pinned by
+#      TestCommitTouchesThreadEmptyComments.
+#   4. No input validation in main() -> fixed; pinned by
+#      TestCliMalformedStdinHandling.
+#   5. Unvalidated mode parameter -> NOT yet fixed; already pinned (red)
+#      by TestFilterResolvableThreadsModeValidation above. Not duplicated
+#      here.
+#   6 (allowlist). _DEFAULT_BOT_ALLOWLIST omits claude-action-runner[bot]
+#      -> NOT yet fixed; already pinned (red) by
+#      TestDefaultAllowlistIncludesClaudeActionRunner above, and per the
+#      test-implementer briefing this one is left for the implementer to
+#      fix directly (non-behavioral constant edit) without a new test.
+#
+# Two genuine gaps remain uncovered by any existing test and are added
+# below:
+#
+#   7. --bot-allowlist CLI flag not exposed on the resolvable-threads
+#      subcommand, even though filter_resolvable_threads() already
+#      accepts a bot_allowlist parameter.
+#   8. No test exercises the actual stdin -> stdout dispatch path for a
+#      real payload on any subcommand; only --help output is checked
+#      (see TestCliSubcommandWiring above).
+#
+# A third, small group characterizes (rather than regresses) the already-
+# guarded _parse_iso8601 contract described as bug 6 in the briefing:
+# raising ValueError on a malformed timestamp, with call sites that
+# already catch it and degrade gracefully instead of propagating it.
+# ---------------------------------------------------------------------------
+
+
+def _run_main_with_stdin(
+    mod: ModuleType,
+    argv: list[str],
+    stdin_payload: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> tuple[Any, Any]:
+    """Run main() with a JSON payload piped via stdin, capturing stdout.
+
+    Mirrors ``TestCliMalformedStdinHandling._run_main_capturing_exit``'s
+    accept-either-return-or-SystemExit contract, and additionally parses
+    any captured stdout as JSON.
+
+    Args:
+        mod: The loaded gh_pr_review_address module.
+        argv: CLI arguments to pass to ``main()``.
+        stdin_payload: JSON-serializable payload written to stdin.
+        monkeypatch: Pytest's monkeypatch fixture, used to replace stdin.
+        capsys: Pytest's stdout/stderr capture fixture.
+
+    Returns:
+        A tuple of ``(exit_code, parsed_stdout_json_or_none)``.
+    """
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(stdin_payload)))
+    try:
+        exit_code: Any = mod.main(argv)
+    except SystemExit as exc:
+        exit_code = exc.code
+    captured = capsys.readouterr()
+    stdout_json = json.loads(captured.out) if captured.out.strip() else None
+    return exit_code, stdout_json
+
+
+# ---------------------------------------------------------------------------
+# Tests: CLI --bot-allowlist flag (genuine red — bug 7)
+# ---------------------------------------------------------------------------
+
+
+class TestCliBotAllowlistFlag:
+    """The ``resolvable-threads`` subcommand must expose a
+    ``--bot-allowlist`` flag that overrides (not extends) the default
+    allow-list consulted by ``filter_resolvable_threads``.
+
+    ``filter_resolvable_threads()`` already accepts a ``bot_allowlist``
+    keyword argument (tested directly at the function level in
+    ``TestResolvableThreadsCustomAllowlist`` above), but the CLI's
+    argparse setup for this subcommand does not wire a corresponding
+    flag through to it.
+    """
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_custom_bot_allowlist_flag_includes_custom_login(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A thread first-authored by a login not in the default
+        allow-list is included when ``--bot-allowlist`` names it.
+
+        Currently FAILS: ``resolvable-threads`` has no ``--bot-allowlist``
+        argument registered, so argparse rejects the flag as an
+        unrecognized argument and main() exits non-zero before the
+        payload is ever processed.
+        """
+        thread = _make_filter_thread(
+            "F16",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login="custom-bot[bot]",
+        )
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            ["resolvable-threads", "--bot-allowlist", "custom-bot[bot]"],
+            {"threads": [thread]},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result == {"resolvable_thread_ids": ["F16"]}
+
+    def test_custom_bot_allowlist_flag_overrides_not_extends_default(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Passing ``--bot-allowlist`` replaces the default allow-list
+        rather than adding to it: a default-allowlisted login is
+        excluded once a different, explicit allow-list is supplied.
+
+        Currently FAILS for the same unrecognized-argument reason as
+        above.
+        """
+        thread = _make_filter_thread(
+            "F17",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login=_DEFAULT_ALLOWLISTED_BOT,
+        )
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            ["resolvable-threads", "--bot-allowlist", "custom-bot[bot]"],
+            {"threads": [thread]},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result == {"resolvable_thread_ids": []}
+
+    def test_bot_allowlist_flag_accepts_comma_separated_logins(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A comma-separated ``--bot-allowlist`` value parses into
+        multiple accepted logins.
+
+        Currently FAILS for the same unrecognized-argument reason as
+        above.
+        """
+        thread_a = _make_filter_thread(
+            "F18",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login="bot-one[bot]",
+        )
+        thread_b = _make_filter_thread(
+            "F19",
+            is_resolved=False,
+            is_outdated=True,
+            first_author_login="bot-two[bot]",
+        )
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            [
+                "resolvable-threads",
+                "--bot-allowlist",
+                "bot-one[bot],bot-two[bot]",
+            ],
+            {"threads": [thread_a, thread_b]},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result is not None
+        assert sorted(result["resolvable_thread_ids"]) == ["F18", "F19"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: CLI subcommand happy-path dispatch (coverage gap — bug 8)
+#
+# These currently PASS against the implementation: main() already wires
+# each subcommand's parsed input to its pure function and prints the
+# result via emit_output. They are added to close the coverage gap noted
+# in the briefing (only --help was previously exercised for the CLI
+# surface), not because a fix is pending.
+# ---------------------------------------------------------------------------
+
+
+class TestCliSubcommandDispatchesRealPayload:
+    """Each subcommand accepts a minimal valid JSON payload via stdin and
+    emits the corresponding classification result as JSON on stdout."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_resolution_state_dispatches_and_emits_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A minimal valid 'resolution-state' payload dispatches to
+        compute_resolution_state and its result is printed as JSON."""
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            ["resolution-state"],
+            {"threads": [], "commits": [], "reviews": []},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result == {"threads": [], "sticky_blockers": []}
+
+    def test_suppression_candidates_dispatches_and_emits_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A minimal valid 'suppression-candidates' payload dispatches to
+        classify_suppression_candidates and its result is printed as
+        JSON."""
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            ["suppression-candidates"],
+            {"comments": []},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result == []
+
+    def test_resolvable_threads_dispatches_and_emits_json(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        """A minimal valid 'resolvable-threads' payload dispatches to
+        filter_resolvable_threads and its result is printed as JSON."""
+        exit_code, result = _run_main_with_stdin(
+            self.mod,
+            ["resolvable-threads"],
+            {"threads": []},
+            monkeypatch,
+            capsys,
+        )
+        assert exit_code == 0
+        assert result == {"resolvable_thread_ids": []}
+
+
+# ---------------------------------------------------------------------------
+# Tests: _parse_iso8601 malformed-timestamp contract (characterization —
+# briefing bug 6)
+#
+# These currently PASS: the raise and both call-site guards already
+# exist. They pin the contract so it cannot silently regress to
+# swallowing bad data with a sentinel value instead of an explicit raise.
+# ---------------------------------------------------------------------------
+
+
+class TestParseIso8601MalformedTimestampContract:
+    """``_parse_iso8601`` raises ``ValueError`` on a malformed timestamp,
+    and the call sites that consume it already guard against that
+    exception rather than letting it propagate."""
+
+    def setup_method(self) -> None:
+        """Load module fresh for each test."""
+        self.mod = _load_module()
+
+    def test_malformed_timestamp_raises_value_error(self) -> None:
+        """A non-ISO-8601 string raises ValueError."""
+        with pytest.raises(ValueError):
+            self.mod._parse_iso8601("not-a-timestamp")
+
+    def test_malformed_comment_timestamp_does_not_crash_resolution_state(
+        self,
+    ) -> None:
+        """A thread whose first comment has a malformed 'createdAt' does
+        not crash compute_resolution_state; the Axis B commit-touch check
+        treats it as not-touched and the thread classifies OPEN."""
+        thread = _make_thread(
+            "T9",
+            is_resolved=False,
+            is_outdated=False,
+            path="src/foo.py",
+            line=12,
+            original_line=12,
+            comments=[
+                _make_thread_comment(9, "coderabbitai[bot]", "not-a-timestamp")
+            ],
+        )
+        commit = _make_commit(
+            "abc123",
+            "2026-08-02T00:00:00Z",
+            [{"filename": "src/foo.py", "patch": _PATCH_SINGLE_HUNK}],
+        )
+        result = self.mod.compute_resolution_state(
+            threads=[thread], commits=[commit], reviews=[]
+        )
+        assert result["threads"][0]["classification"] == "OPEN"

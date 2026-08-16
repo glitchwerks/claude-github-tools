@@ -715,23 +715,18 @@ Only ever resolve threads authored by a configured **review bot**. The
 default allow-list (`_DEFAULT_BOT_ALLOWLIST` in the script):
 
 - `chatgpt-codex-connector[bot]`
+- `claude-action-runner[bot]`
 - `coderabbitai[bot]`
 - `copilot-pull-request-reviewer[bot]`
 
-**Known gap:** Step 3's suppression filter also recognizes
-`claude-action-runner[bot]`, but this resolver allow-list doesn't include
-it yet — a suppressed Claude-runner finding can't currently be
-auto-resolved via Step 4.5 even though it's suppressed at intake. Tracked
-as a follow-up; until fixed, treat a Claude-runner-authored thread as
-needing the pre-script manual check if you want it resolved this run.
+The resolver allow-list matches Step 3's suppression set, so suppressed
+findings from those review bots can also be auto-resolved via Step 4.5.
 
 The allow-list is configurable at the function level
-(`filter_resolvable_threads`'s `bot_allowlist` parameter) — the CLI
-subcommand does not yet expose a flag for it, so if the user wants a custom
-list for a given run, note the request and fall back to the pre-script
-per-thread manual check for that run rather than silently ignoring the
-customization. **Never resolve a thread authored by a non-bot (human)
-reviewer**, in either mode.
+(`filter_resolvable_threads`'s `bot_allowlist` parameter) and through the
+CLI's `--bot-allowlist` flag. Pass comma-separated logins; a supplied list
+overrides rather than extends the default. **Never resolve a thread authored
+by a non-bot (human) reviewer**, in either mode.
 
 ### Procedure
 

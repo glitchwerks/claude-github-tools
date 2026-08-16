@@ -37,6 +37,7 @@ _COPILOT_CORRECTNESS_RE: re.Pattern[str] = re.compile(
 _DEFAULT_BOT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "chatgpt-codex-connector[bot]",
+        "claude-action-runner[bot]",
         "coderabbitai[bot]",
         "copilot-pull-request-reviewer[bot]",
     }
@@ -274,7 +275,13 @@ def filter_resolvable_threads(
     Returns:
         Mapping containing an input-ordered list of resolvable thread
         identifiers.
+
+    Raises:
+        ValueError: If mode is not exactly ``A`` or ``B``.
     """
+    if mode not in {"A", "B"}:
+        raise ValueError(f"Invalid mode {mode!r}; expected 'A' or 'B'.")
+
     effective_allowlist = (
         _DEFAULT_BOT_ALLOWLIST if bot_allowlist is None else bot_allowlist
     )
@@ -328,6 +335,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default="B",
         help="Resolution mode (default: B).",
     )
+    resolvable_parser.add_argument(
+        "--bot-allowlist",
+        default=None,
+        help="Comma-separated bot login allowlist.",
+    )
     return parser
 
 
@@ -374,8 +386,15 @@ def main(argv: list[str] | None = None) -> int:
                 comments=input_data["comments"]
             )
         else:
+            bot_allowlist = (
+                {login.strip() for login in args.bot_allowlist.split(",")}
+                if args.bot_allowlist is not None
+                else None
+            )
             result = filter_resolvable_threads(
-                threads=input_data["threads"], mode=args.mode
+                threads=input_data["threads"],
+                mode=args.mode,
+                bot_allowlist=bot_allowlist,
             )
     except KeyError as exc:
         print(
