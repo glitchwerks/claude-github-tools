@@ -176,7 +176,7 @@ Anchor everything to the current head SHA:
 HEAD_SHA=$(gh pr view <N> --repo <owner>/<repo> --json headRefOid --jq .headRefOid)
 ```
 
-### Axis A — inline thread resolution (authoritative when present)
+### Fetch the raw inputs (Axis A/B/C source data)
 
 `isResolved` / `isOutdated` live ONLY in the GraphQL `reviewThreads` API, never
 in REST. Fetch them — dump to a file, since these responses get large and `jq`
@@ -207,56 +207,72 @@ fetch can also detect an existing reply (see § Reply and resolve are
 independently retryable).
 
 Paginate past 100 with the `pageInfo` cursor rather than silently truncating.
-Per thread:
 
-- `isResolved == true` → **RESOLVED** — drop from triage; never re-surface.
-- `isResolved == false` → carry to Axis B.
-
-### Axis B — line correctness (unresolved threads only)
-
-A thread the reviewer never clicked "Resolve" on may still be handled in code —
-bots almost never self-resolve. For each unresolved thread, decide whether a
-commit **after the thread's first comment** touched its `path` near its `line`:
+Also fetch the PR's commits (with dates) and each commit's per-file patch,
+and its reviews:
 
 ```bash
 # commits (with dates) on the PR
-gh api repos/<owner>/<repo>/pulls/<N>/commits --jq '.[] | {sha:.sha, date:.commit.committer.date}'
-# for a candidate commit, inspect its patch for the thread's file
-gh api repos/<owner>/<repo>/commits/<sha> --jq '.files[] | select(.filename=="<path>") | .patch'
-```
-
-Classify:
-
-- `isOutdated == true`, **or** a post-comment commit touched the line region →
-  **CANDIDATE-ADDRESSED** — gets a confirming thread reply, not a re-fix.
-- line untouched since the comment → **OPEN** — genuinely actionable.
-
-### Axis C — review verdict (sticky blockers)
-
-Independent of any thread state: a formal `CHANGES_REQUESTED` review stays
-blocking until the **same reviewer** submits a later `APPROVED`. **New commits
-do NOT clear it.** This is the axis the skill historically missed entirely — a
-PR with every inline thread resolved can still be hard-blocked here.
-
-```bash
+gh api repos/<owner>/<repo>/pulls/<N>/commits --jq \
+  '[.[] | {sha:.sha, date:.commit.committer.date}]' > .tmp/pr<N>-commits.json
+# per candidate commit, its file patches (repeat per commit sha, or fetch
+# in bulk if the PR is small — merge into a "files" array per commit)
+gh api repos/<owner>/<repo>/commits/<sha> --jq \
+  '{sha:.sha, date:.commit.committer.date, files:[.files[] | {filename, patch}]}'
+# reviews
 gh api repos/<owner>/<repo>/pulls/<N>/reviews --jq \
-  '.[] | {user:.user.login, state:.state, at:.submitted_at, commit:.commit_id}'
+  '[.[] | {user:{login:.user.login}, state:.state, submitted_at:.submitted_at, commit_id:.commit_id}]' \
+  > .tmp/pr<N>-reviews.json
 ```
 
-Per reviewer, take their latest review by `submitted_at`:
+### Compute the three axes via the script
 
-- latest state `CHANGES_REQUESTED` with **no later `APPROVED` from that same
-  reviewer** → **STICKY BLOCKER**. Surface as the top blocking item — the PR
-  cannot merge until that reviewer re-reviews, no matter how many threads are
-  resolved.
-- latest state `APPROVED` → cleared.
-- `COMMENTED`-only reviewers (many bots) → non-blocking at the verdict axis;
-  their findings still triage via Axis A/B.
-
-Before weighting a blocking review, verify it targets a commit actually in head
-(not a stale review on an abandoned push):
+Do NOT hand-classify threads by reading `isOutdated`/patches/review states
+yourself — `scripts/gh-pr-review-address.py resolution-state` computes all
+three axes deterministically from the fetched JSON:
 
 ```bash
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+python -c "
+import json
+threads = json.load(open('.tmp/pr<N>-threads.json'))  # nodes list
+commits = json.load(open('.tmp/pr<N>-commits.json'))   # with files/patch merged in
+reviews = json.load(open('.tmp/pr<N>-reviews.json'))
+print(json.dumps({'threads': threads, 'commits': commits, 'reviews': reviews}))
+" | "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/gh-pr-review-address.py" resolution-state
+```
+
+It returns one JSON object:
+
+```json
+{
+  "threads": [{"id": "...", "classification": "RESOLVED|CANDIDATE-ADDRESSED|OPEN", "path": "...", "line": 42}],
+  "sticky_blockers": ["<reviewer login>", ...]
+}
+```
+
+**What each classification means** (the script's rules, for reference —
+you don't need to re-derive them, just act on the output):
+
+- `RESOLVED` — `isResolved == true` on the thread. Drop from triage; never
+  re-surface.
+- `CANDIDATE-ADDRESSED` — thread unresolved but `isOutdated == true`, or a
+  commit **after the thread's first comment** touched its `path` near its
+  `line`. Gets a confirming thread reply, not a re-fix.
+- `OPEN` — unresolved and untouched since the comment. Genuinely actionable.
+- `sticky_blockers` — reviewer logins whose latest review is
+  `CHANGES_REQUESTED` with no later `APPROVED` from that same reviewer.
+  **New commits do NOT clear this** — it's the axis the skill historically
+  missed entirely; a PR with every inline thread resolved can still be
+  hard-blocked here. Surface as the top blocking item.
+
+Before weighting a blocking review, verify it targets a commit actually in
+head (not a stale review on an abandoned push) — the script does not fetch
+this itself, check separately:
+
+```bash
+HEAD_SHA=$(gh pr view <N> --repo <owner>/<repo> --json headRefOid --jq .headRefOid)
 gh api repos/<owner>/<repo>/compare/<review_commit>...<HEAD_SHA> --jq .status
 # identical / ahead => review commit is an ancestor of head (current)
 # diverged          => stale review on an abandoned commit; do not weight
@@ -265,14 +281,15 @@ gh api repos/<owner>/<repo>/compare/<review_commit>...<HEAD_SHA> --jq .status
 ### Reconcile and hand off
 
 Counts MUST add up: `total threads = RESOLVED + unresolved`, and
-`unresolved = CANDIDATE-ADDRESSED + OPEN`. If a number is uncertain, label it
-`unverified` — never guess "addressed".
+`unresolved = CANDIDATE-ADDRESSED + OPEN` (the script's per-thread
+`classification` field lets you tally this directly — if a number looks off,
+re-check the input JSON rather than guessing).
 
-The **OPEN set Step 3 triages** = (Axis B OPEN threads) ∪ (un-addressed
-conversation / review-body findings from Step 2). RESOLVED and
-CANDIDATE-ADDRESSED threads generate no fix-up work — CANDIDATE-ADDRESSED gets a
-confirming reply at most. **STICKY BLOCKER verdicts (Axis C) are carried into
-Step 3 as the highest-priority items.**
+The **OPEN set Step 3 triages** = (script-classified `OPEN` threads) ∪
+(un-addressed conversation / review-body findings from Step 2). `RESOLVED`
+and `CANDIDATE-ADDRESSED` threads generate no fix-up work —
+`CANDIDATE-ADDRESSED` gets a confirming reply at most. **`sticky_blockers`
+entries are carried into Step 3 as the highest-priority items.**
 
 This shares the `reviewThreads` query with Step 4.5 but runs at the opposite
 end: Step 2.5 **reads** resolution state to scope triage; Step 4.5 **writes**
@@ -319,14 +336,31 @@ gating bot are the exception** — see § Gating bots: reply + resolve, not
 fully silent below. Either way, every suppressed item is counted and listed
 in the Step 5 summary so the user can override.
 
-**Bot-specific patterns:**
+**Bot-specific patterns — run the script, don't pattern-match by hand:**
 
-| Bot                             | Suppress these                                                               |
-| ------------------------------- | ---------------------------------------------------------------------------- |
-| `claude-action-runner[bot]`     | `findings.low` (the schema's lowest tier)                                    |
-| `coderabbitai[bot]`             | Inline comments starting with `Nitpick:` or `Nit:`                           |
-| `chatgpt-codex-connector[bot]`  | Findings explicitly tagged `P3` or lower                                     |
-| `copilot-pull-request-reviewer` | Suggestions framed as style/formatting preferences with no correctness claim |
+`scripts/gh-pr-review-address.py suppression-candidates` applies the
+bot-specific lookup table deterministically (`claude-action-runner[bot]`'s
+`findings.low` tier, `coderabbitai[bot]`'s `Nitpick:`/`Nit:` prefix,
+`chatgpt-codex-connector[bot]`'s `P3`-or-lower tag, and
+`copilot-pull-request-reviewer[bot]`'s style-vs-correctness heuristic) so
+you don't re-derive these regexes by eye every run:
+
+```bash
+PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+[ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+echo '{"comments": [{"comment_id": 1001, "author_login": "coderabbitai[bot]", "body": "..."}]}' \
+  | "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/gh-pr-review-address.py" suppression-candidates
+```
+
+Feed it the **inline** finding stream (Step 2 item #2) as
+`{"comments": [{"comment_id", "author_login", "body"}, ...]}`. It returns
+per-comment `{"comment_id", "author_login", "suppress_candidate": bool,
+"matched_rule": str|null}`. Treat `suppress_candidate: true` as a strong
+signal, not an auto-suppress — the cross-bot judgment pass below still
+applies on top of it, and a candidate can still be kept if it's actually
+substantive (see "Always keep" below). The script only covers the inline
+stream; conversation-stream findings (Step 2 item #3) have no per-comment
+`comment_id` to feed it and go straight to the cross-bot judgment pass.
 
 **Cross-bot pattern (apply to any review source, including human reviews):**
 
@@ -663,8 +697,13 @@ allow-list to the same bots the Step 3 suppression filter recognizes:
 - `coderabbitai[bot]`
 - `copilot-pull-request-reviewer[bot]`
 
-The allow-list is configurable — the user may add or remove bot logins. **Never
-resolve a thread authored by a non-bot (human) reviewer**, in either mode.
+The allow-list is configurable at the function level
+(`filter_resolvable_threads`'s `bot_allowlist` parameter) — the CLI
+subcommand does not yet expose a flag for it, so if the user wants a custom
+list for a given run, note the request and fall back to the pre-script
+per-thread manual check for that run rather than silently ignoring the
+customization. **Never resolve a thread authored by a non-bot (human)
+reviewer**, in either mode.
 
 ### Procedure
 
@@ -693,10 +732,26 @@ resolve a thread authored by a non-bot (human) reviewer**, in either mode.
    If the PR has more than 100 review threads, paginate with the `pageInfo`
    cursor rather than silently processing only the first page.
 
-2. **Filter** to threads where all of these hold:
-   - `isResolved == false`
-   - the first comment's `author.login` is in the bot allow-list
-   - **(Mode B only)** `isOutdated == true`
+2. **Filter** — pipe the raw `nodes[]` array into
+   `scripts/gh-pr-review-address.py resolvable-threads` instead of
+   hand-checking `isResolved`/`isOutdated`/author per thread:
+
+   ```bash
+   PY="${CLAUDE_PLUGIN_DATA}/venv/Scripts/python.exe"
+   [ -f "$PY" ] || PY="${CLAUDE_PLUGIN_DATA}/venv/bin/python"
+   echo "{\"threads\": $THREAD_NODES_JSON}" \
+     | "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/gh-pr-review-address.py" \
+       resolvable-threads --mode B
+   ```
+
+   `$THREAD_NODES_JSON` is the `nodes[]` array from step 1, unmodified (each
+   node already carries `id`, `isResolved`, `isOutdated`, and
+   `comments.nodes[0].author.login` — the exact shape the script expects).
+   Pass `--mode A` only when the user explicitly asked for the aggressive
+   mode. The script applies the same three conditions as before
+   (`isResolved == false`, first-comment author in the bot allow-list —
+   default list matches Step 3's — and, Mode B only, `isOutdated == true`)
+   and returns `{"resolvable_thread_ids": [...]}`.
 
 3. **Resolve** each surviving thread by its node `id`:
 
