@@ -10,6 +10,18 @@ Covers the scalar-jq regression introduced in issue #7:
   - Non-zero exit code still raises ``RuntimeError`` regardless of whether
     a ``jq`` filter was supplied.
 
+Covers the multi-page pagination regression from issue #41:
+  - ``gh api --paginate`` (without ``--slurp``) emits one JSON document
+    per page, concatenated back-to-back with no separator. A response
+    spanning more than one page must not raise ``JSONDecodeError`` and
+    must return the combined, flattened list of items across all pages.
+  - A single-page paginated response continues to return that page's
+    list unchanged.
+  - ``paginate=True`` combined with an explicit ``jq`` filter must
+    combine the per-page filtered results into one Python list, and
+    must never result in ``gh`` being invoked with both ``--slurp``
+    and ``--jq`` at once (``gh api`` rejects that combination).
+
 All subprocess calls are mocked via ``unittest.mock.patch`` on
 ``subprocess.run``, matching the pattern used in sibling test files
 (``test_gh_summary.py``, ``test_gh_release_status.py``).
@@ -208,3 +220,137 @@ class TestRunGhApiNoJq:
                 mod.run_gh_api(
                     "repos/owner/repo", jq=".default_branch"
                 )
+
+
+# ---------------------------------------------------------------------------
+# TestRunGhApiPaginate — multi-page concatenated JSON (issue #41 regression)
+# ---------------------------------------------------------------------------
+
+
+def _make_paginate_side_effect(pages: list[list[dict]]):
+    """Build a subprocess.run side_effect that simulates `gh api`.
+
+    Simulates whichever of the two valid pagination strategies the
+    command under test actually asked for, keeping these tests
+    agnostic to which fix strategy the implementation picks:
+
+    - No ``--slurp``: ``gh api --paginate`` writes one JSON document
+      per page directly to stdout, concatenated back-to-back with no
+      separator (e.g. ``[{"id": 1}][{"id": 2}]``).
+    - With ``--slurp``: ``gh api --paginate --slurp`` wraps all pages
+      in one outer JSON array of pages (e.g.
+      ``[[{"id": 1}], [{"id": 2}]]``).
+
+    Args:
+        pages: The pages to emit, each page a list of JSON-able
+            items — mirrors what a `gh api <list-endpoint>` call
+            returns per page.
+
+    Returns:
+        A callable usable as ``subprocess.run``'s ``side_effect``,
+        inspecting the command it's called with to decide which of
+        the two stdout shapes above to emit.
+    """
+
+    def _side_effect(cmd, *args, **kwargs):
+        if "--slurp" in cmd:
+            return _make_cp(stdout=json.dumps(pages))
+        return _make_cp(stdout="".join(json.dumps(p) for p in pages))
+
+    return _side_effect
+
+
+class TestRunGhApiPaginate:
+    """run_gh_api with paginate=True handles multi-page gh output.
+
+    Regression coverage for issue #41: a single
+    ``json.loads(result.stdout)`` call cannot parse the concatenated,
+    multi-document stdout that ``gh api --paginate`` (without
+    ``--slurp``) produces for any response spanning more than one
+    page — it raises ``json.JSONDecodeError: Extra data``.
+    """
+
+    def test_paginate_multiple_pages_returns_flattened_list(
+        self,
+    ) -> None:
+        """Two paginated array pages combine into one flat list.
+
+        Regression guard for issue #41: this must not raise
+        JSONDecodeError, and must return every item across both pages
+        flattened into a single list.
+        """
+        mod = _load_common()
+        pages = [[{"id": 1}], [{"id": 2}]]
+        with patch(
+            "subprocess.run", side_effect=_make_paginate_side_effect(pages)
+        ):
+            result = mod.run_gh_api(
+                "repos/owner/repo/issues", paginate=True
+            )
+        assert result == [{"id": 1}, {"id": 2}]
+
+    def test_paginate_multiple_pages_no_exception_raised(self) -> None:
+        """run_gh_api must not raise JSONDecodeError for multi-page stdout."""
+        mod = _load_common()
+        pages = [[{"id": 1}], [{"id": 2}]]
+        with patch(
+            "subprocess.run", side_effect=_make_paginate_side_effect(pages)
+        ):
+            try:
+                mod.run_gh_api("repos/owner/repo/issues", paginate=True)
+            except Exception as exc:  # noqa: BLE001
+                pytest.fail(
+                    f"run_gh_api raised {type(exc).__name__} for "
+                    f"multi-page stdout: {exc}"
+                )
+
+    def test_paginate_single_page_returns_that_page(self) -> None:
+        """A single-page paginated response returns that page's list.
+
+        Characterization test: this is the pre-existing single-page
+        case that already worked, pinned so a pagination fix cannot
+        regress it.
+        """
+        mod = _load_common()
+        payload = [{"id": 1}, {"id": 2}]
+        pages = [payload]
+        with patch(
+            "subprocess.run", side_effect=_make_paginate_side_effect(pages)
+        ):
+            result = mod.run_gh_api(
+                "repos/owner/repo/issues", paginate=True
+            )
+        assert result == payload
+
+    def test_paginate_with_jq_combines_filtered_pages(self) -> None:
+        """paginate=True + jq="." must still return the flattened list.
+
+        Mirrors the pattern already used in production by
+        ``gh-summary.py`` and ``gh-refresh-issues.py``, which both
+        call ``run_gh_api(..., paginate=True, jq=".")`` and rely on
+        getting back a flat ``list[dict]`` across all pages — the
+        identity jq filter selects each page's array unchanged, so
+        the combined result must match the plain paginate=True case.
+
+        This also pins the documented incompatibility between gh's
+        ``--slurp`` and ``--jq`` flags: whatever command run_gh_api
+        builds for paginate+jq, it must never pass both flags to
+        `gh` at once, since `gh api` rejects that combination
+        outright.
+        """
+        mod = _load_common()
+        pages = [[{"id": 1}], [{"id": 2}]]
+        side_effect = _make_paginate_side_effect(pages)
+        with patch("subprocess.run", side_effect=side_effect) as mock_run:
+            result = mod.run_gh_api(
+                "repos/owner/repo/issues", paginate=True, jq="."
+            )
+        assert result == [{"id": 1}, {"id": 2}]
+
+        # Whatever flags were passed to `gh`, --slurp and --jq must
+        # never appear together (gh api rejects that combination).
+        call_args = mock_run.call_args[0][0]
+        assert not ("--slurp" in call_args and "--jq" in call_args), (
+            "gh api rejects --slurp combined with --jq; run_gh_api "
+            "must not pass both flags at once"
+        )
